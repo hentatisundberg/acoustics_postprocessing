@@ -1,0 +1,16 @@
+pandas>=2.0
+numpy>=1.23
+scipy>=1.10
+statsmodels>=0.14
+matplotlib>=3.7
+seaborn>=0.13
+folium>=0.15
+h3>=3.7.6
+shapely>=2.0
+geopandas>=0.14
+pyyaml>=6.0
+rich>=13.7
+dask[dataframe]>=2024.1.0
+pyarrow>=14.0
+langchain>=0.1.0
+openai>=1.6.0

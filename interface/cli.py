@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from rich.console import Console
+from rich.prompt import Prompt
+
+from interface.nlp_interpreter import CommandInterpreter
+from interface.task_executor import TaskExecutor
+
+
+def main() -> None:
+    console = Console()
+    console.print("Acoustics Analysis CLI — type 'help' or 'exit'", style="bold green")
+
+    interpreter = CommandInterpreter()
+    executor = TaskExecutor(Path("config/settings.yaml"))
+
+    while True:
+        try:
+            user_input = Prompt.ask("»")
+        except (EOFError, KeyboardInterrupt):
+            console.print("\nBye!", style="bold yellow")
+            break
+
+        cmd = interpreter.parse_command(user_input)
+        ok, err = interpreter.validate_command(cmd)
+        if not ok:
+            console.print(f"Invalid command: {err}", style="bold red")
+            continue
+        result = executor.execute(cmd)
+        if result.message == "exit":
+            console.print("Bye!", style="bold yellow")
+            break
+        style = "green" if result.ok else "red"
+        console.print(result.message, style=style)
+        if result.artifact:
+            console.print(f"Artifact: {result.artifact}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,29 @@
+data:
+  network_storage_path: "./data"
+  acoustic_csv_pattern: "*.csv"
+  position_file: "positions.csv"
+  cache_directory: "./cache"
+
+processing:
+  default_temporal_resolution: "5min"
+  default_hex_resolution: 8
+  time_merge_tolerance: "5s"
+
+analysis:
+  outlier_method: "iqr"
+  smoothing_method: "lowess"
+  lowess_fraction: 0.1
+
+visualization:
+  default_colormap: "viridis"
+  figure_dpi: 300
+  map_basemap: "OpenStreetMap"
+
+interface:
+  llm_provider: "openai"
+  api_key_env_var: "OPENAI_API_KEY"
+  command_history_file: ".command_history"
+
+logging:
+  level: "INFO"
+  file: "acoustics_analysis.log"
