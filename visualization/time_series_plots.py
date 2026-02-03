@@ -3,6 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Union
 
+import os
+import matplotlib
+# Use a non-interactive backend when no display is available to avoid hangs
+if not os.environ.get("DISPLAY"):
+    try:
+        matplotlib.use("Agg", force=True)
+    except Exception:
+        pass
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
@@ -65,6 +73,8 @@ class TimeSeriesPlotter:
         fig.tight_layout()
         return fig
 
-    def save_plot(self, fig, output_path: Path, format: str = "png") -> None:
+    def save_plot(self, fig, output_path: Path, format: str = "png", close: bool = True) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path.with_suffix(f".{format}"), dpi=300)
+        if close:
+            plt.close(fig)

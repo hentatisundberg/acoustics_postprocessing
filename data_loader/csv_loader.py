@@ -33,7 +33,26 @@ class AcousticsDataLoader:
     ) -> dd.DataFrame | pd.DataFrame:
         if not file_paths:
             raise ValueError("No input files provided")
-        parse_dates = parse_dates or [self.timestamp_col]
+        # Determine separator based on file extension (simple heuristic)
+        ext = file_paths[0].suffix.lower()
+        sep = "\t" if ext in {".tsv", ".txt"} else ","
+
+        # Inspect first file header to resolve actual timestamp column case-insensitively
+        try:
+            header_df = pd.read_csv(file_paths[0], nrows=0, sep=sep)
+            col_lut = {c.lower().strip(): c for c in header_df.columns}
+            ts_key = next((k for k in ("time", "timestamp", "datetime", "date") if k in col_lut), None)
+            resolved_ts_col = col_lut[ts_key] if ts_key else None
+        except Exception:
+            resolved_ts_col = None
+
+        # Prefer detected timestamp column for parse_dates; fallback to provided/self
+        if parse_dates is None:
+            if resolved_ts_col is not None:
+                parse_dates = [resolved_ts_col]
+            else:
+                # Avoid failing parse if the guessed column isn't present; we'll parse later
+                parse_dates = []
 
         if lazy:
             logger.info("Loading %d CSV files with Dask", len(file_paths))
@@ -43,15 +62,28 @@ class AcousticsDataLoader:
                 parse_dates=parse_dates,
                 assume_missing=assume_missing,
                 blocksize=blocksize,
+                sep=sep,
             )
-            ddf = ddf.rename(columns=self.column_map)
+            # Normalize column names to lowercase first, then apply mapping like {"time": "timestamp"}
+            ddf = ddf.rename(columns={c: c.lower().strip() for c in ddf.columns})
+            if self.column_map:
+                ddf = ddf.rename(columns=self.column_map)
+            # Ensure timestamp column is datetime if present
+            if "timestamp" in ddf.columns:
+                ddf["timestamp"] = dd.to_datetime(ddf["timestamp"], errors="coerce")
             return ddf
         else:
             logger.info("Loading %d CSV files eagerly with Pandas", len(file_paths))
             parts = []
             for p in track(file_paths, description="Reading CSVs"):
-                df = pd.read_csv(p, dtype=dtype, parse_dates=parse_dates)
+                df = pd.read_csv(p, dtype=dtype, parse_dates=parse_dates, sep=sep)
+                # Normalize columns and apply mapping
+                df.columns = [c.lower().strip() for c in df.columns]
+                if self.column_map:
+                    df.rename(columns=self.column_map, inplace=True)
                 parts.append(df)
             df_all = pd.concat(parts, ignore_index=True)
-            df_all.rename(columns=self.column_map, inplace=True)
+            # If timestamp exists, ensure datetime dtype
+            if "timestamp" in df_all.columns:
+                df_all["timestamp"] = pd.to_datetime(df_all["timestamp"], errors="coerce")
             return df_all

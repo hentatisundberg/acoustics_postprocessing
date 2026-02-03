@@ -25,8 +25,8 @@ Note: `geopandas` and `shapely` have prebuilt wheels for macOS. If installation 
 
 ### 2) Prepare your data
 
-- Acoustic CSVs: should include at minimum `timestamp` and your measurement column(s), e.g. `backscatter`.
-- Position CSV (default `positions.csv`): must contain `timestamp`, `latitude`, `longitude` columns.
+- Acoustic CSVs: should include at minimum `timestamp` and your measurement column(s), e.g. `backscatter`. The CLI also accepts a column named `time` and normalizes it to `timestamp` automatically.
+- Position CSV/TSV (default `positions.csv`): must contain `timestamp`, `latitude`, `longitude` columns. The CLI also accepts files with columns named `Time`, `Lat`, `Long` (as in `positions.txt`) and normalizes them automatically; tab-delimited `.txt`/`.tsv` files are supported.
 - Place files under `./data` by default, or point to your location via CLI `set` command.
 
 Example structure:
@@ -49,18 +49,21 @@ You’ll get an interactive prompt. Common commands:
 
 - Configure paths (optional):
   - `set dir=./data pattern=*.csv positions=positions.csv`
+- Define aliases (optional):
+  - `alias bs=backscatter temp=temp_water`
 - Load and merge data:
   - `load` (uses current settings)
   - or `load dir=./data pattern=*.csv positions=positions.csv`
+  - Position merging uses time-based interpolation to assign geo-coordinates to acoustic timestamps when they don't exactly match.
 - Temporal aggregation:
-  - `aggregate time 5min`
+  - `aggregate time 5min y=bs`  (omit `y=` to default to `backscatter`)
 - Plot time series (optionally aggregate inline):
-  - `plot y=backscatter 5min`
-  - `plot scatter y=backscatter`
+  - `plot y=bs 5min`
+  - `plot scatter y=bs`
 - Hexagon map:
-  - `map hex y=backscatter res=8`
+  - `map hex y=bs res=8`
 - Descriptive statistics:
-  - `stats columns=backscatter`
+  - `stats columns=bs,temp`
 - Help / Exit:
   - `help`  |  `exit`
 
@@ -97,3 +100,26 @@ This version includes a rule-based interpreter for common phrasing. Integration 
 
 ## License
 Internal/research use. Add a license if you plan to distribute.
+
+## Typical path for data files: 
+load dir=../../../../../../mnt/BSP_NAS2_work/Acoustics_output_data/Echopype_results/Finngrundet2025/csv/ data pattern=SLUAquaSailor2020V2-Phase0-*.csv
+
+## Typical path for position files: 
+load dir=./data pattern=*.txt positions=positions.txt
+
+
+## Custom Variables (Aliases)
+You can plot, map, aggregate, and compute stats on any column by defining your own CLI variables (aliases) or by using the raw column names directly.
+
+- Define aliases:
+  - `alias bs=backscatter temp=temp_water`
+- Use aliases in commands:
+  - Plot: `plot y=bs 5min`  (or `plot y=backscatter 5min` without alias)
+  - Scatter: `plot scatter y=bs`
+  - Aggregate: `aggregate time 5min y=bs`  (default is `backscatter` if `y` omitted)
+  - Map: `map hex y=bs res=8`
+  - Stats: `stats columns=bs,temp`
+
+Notes:
+- Aliases are session-scoped (they persist until you exit the CLI).
+- If you prefer, you can skip `alias` entirely and pass the actual column name via `y=` and `columns=`.
