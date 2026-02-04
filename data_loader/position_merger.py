@@ -5,6 +5,11 @@ from typing import Optional
 
 import pandas as pd
 
+# For coordinate transformation
+from pathlib import Path
+import pyproj
+from utils.io_helpers import read_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,11 +20,44 @@ class PositionMerger:
         position_time_col: str = "timestamp",
         lat_col: str = "latitude",
         lon_col: str = "longitude",
+        config_path: str | Path = "config/settings.yaml",
     ):
         self.acoustic_time_col = acoustic_time_col
         self.position_time_col = position_time_col
         self.lat_col = lat_col
         self.lon_col = lon_col
+
+        # Load coordinate config
+        config = read_config(Path(config_path))
+        coords_cfg = config.get("coordinates", {})
+        self.input_crs = coords_cfg.get("input_crs", "EPSG:4326")
+        self.output_crs = coords_cfg.get("output_crs", "EPSG:3006")
+        self.transform_on_load = coords_cfg.get("transform_on_load", True)
+        columns = coords_cfg.get("columns", {})
+        self.input_lon_col = columns.get("input_lon", "longitude")
+        self.input_lat_col = columns.get("input_lat", "latitude")
+        self.output_easting_col = columns.get("output_easting", "easting")
+        self.output_northing_col = columns.get("output_northing", "northing")
+        self.keep_original = columns.get("keep_original", True)
+        self.original_lon_suffix = columns.get("original_lon_suffix", "_wgs84")
+        self.original_lat_suffix = columns.get("original_lat_suffix", "_wgs84")
+
+        # Prepare transformer
+        self._transformer = pyproj.Transformer.from_crs(self.input_crs, self.output_crs, always_xy=True)
+
+    def _add_transformed_coords(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self.transform_on_load:
+            return df
+        lon = df[self.input_lon_col]
+        lat = df[self.input_lat_col]
+        easting, northing = self._transformer.transform(lon.values, lat.values)
+        df[self.output_easting_col] = easting
+        df[self.output_northing_col] = northing
+        if self.keep_original:
+            # Optionally keep original lat/lon with suffix
+            df[self.input_lon_col + self.original_lon_suffix] = lon
+            df[self.input_lat_col + self.original_lat_suffix] = lat
+        return df
 
     def merge_positions(
         self,
@@ -49,6 +87,8 @@ class PositionMerger:
         merged["position_matched"] = (~merged[self.lat_col].isna()) & (~merged[self.lon_col].isna())
         match_rate = merged["position_matched"].mean() * 100
         logger.info("Position match rate: %.2f%%", match_rate)
+        # Add transformed coordinates if enabled
+        merged = self._add_transformed_coords(merged)
         return merged
 
     def interpolate_positions(self, data: pd.DataFrame, method: str = "linear", limit: Optional[int] = None) -> pd.DataFrame:
@@ -97,4 +137,6 @@ class PositionMerger:
         out["position_matched"] = (~out[self.lat_col].isna()) & (~out[self.lon_col].isna())
         match_rate = out["position_matched"].mean() * 100
         logger.info("Position interpolation match rate: %.2f%%", match_rate)
+        # Add transformed coordinates if enabled
+        out = self._add_transformed_coords(out)
         return out

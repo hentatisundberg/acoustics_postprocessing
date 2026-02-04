@@ -8,6 +8,14 @@ processing:
   default_temporal_resolution: "5min"
   default_hex_resolution: 8
   time_merge_tolerance: "5s"
+  date_filtering:
+    default_format: "%Y-%m-%d"
+  transformations:
+    log:
+      handle_non_positive: "exclude"
+      offset_value: 1.0
+    thresholding:
+      inclusive: true
 
 analysis:
   outlier_method: "iqr"
@@ -17,6 +25,20 @@ analysis:
 visualization:
   default_colormap: "viridis"
   figure_dpi: 300
+  boxplot:
+    figsize: [10, 6]
+    showfliers: true
+    vert: true
+    whis: 1.5
+  map:
+    default_backend: "matplotlib"  # "matplotlib" or "folium"
+    show_colorbar: true
+    use_basemap: true
+    basemap_source: "OpenStreetMap.Mapnik"
+    basemap_zoom: "auto"
+    hex_edge_color: "none"
+    hex_alpha: 0.7
+    coastline_path: "./data/geodata/CNTR_RG_03M_2024_4326.geojson"
   map_basemap: "OpenStreetMap"
 
 interface:
@@ -27,3 +49,17 @@ interface:
 logging:
   level: "INFO"
   file: "acoustics_analysis.log"
+
+# Coordinate system configuration
+coordinates:
+  input_crs: "EPSG:4326"  # WGS84 lat/lon
+  output_crs: "EPSG:3006"  # SWEREF99 TM
+  transform_on_load: true
+  columns:
+    input_lon: "longitude"
+    input_lat: "latitude"
+    output_easting: "easting"
+    output_northing: "northing"
+    keep_original: true
+    original_lon_suffix: "_wgs84"
+    original_lat_suffix: "_wgs84"

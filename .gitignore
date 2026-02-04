@@ -1,0 +1,101 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+
+# Build and packaging
+build/
+dist/
+develop-eggs/
+downloads/
+.eggs/
+*.egg-info/
+*.egg
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+MANIFEST
+*.spec
+
+# Testing and coverage
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checkers
+.mypy_cache/
+.pytype/
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+.profile_default/
+.ipython/
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs and temp
+*.log
+logs/
+*.tmp
+tmp/
+*.swp
+*~
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Data artifacts (adjust as needed)
+data/
+datasets/
+outputs/
+reports/
+figures/
+*.csv
+*.tsv
+*.parquet
+*.h5
+*.db
+*.sqlite
+*.sqlite3
+*.rdb
+*.bak
+*.gz
+*.zip
+*.tar
+*.tar.gz
+
+# Misc caches
+*.cache/

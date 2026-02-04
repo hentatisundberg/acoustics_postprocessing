@@ -1,0 +1,5 @@
+Major changes 1
+
+- Add functionality to change coordinate system, as the current one (GPS) is not fit for this geographic area. I want to use the coordinate system SWEREF99. 
+- When creating maps, I want to have a matplotlib window opened, so I can pan and zoom in the plot window. I also want a color scale on this map.
+- When creating a scatter plot, I want to be able to specify both x and y.  

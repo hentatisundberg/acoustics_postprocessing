@@ -1,0 +1,13 @@
+Major changes
+
+Plotting boxplots
+- Add a functionality to plot boxplots, with x and y being specified in the CLI
+
+Control date limits 
+- Add a control in the CLI for specifying start and end dates for the plots (maps,scatter, line, boxplot)
+
+Allow data transformations
+- Add a control in the CLI to be able to make data transformations, importantly natural logarithm of values
+- Add a control in the CLI to remove data values above and below user-specified values
+
+

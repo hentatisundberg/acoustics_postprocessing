@@ -12,7 +12,11 @@ from interface.task_executor import TaskExecutor
 
 def main() -> None:
     console = Console()
-    console.print("Acoustics Analysis CLI — type 'help' or 'exit'", style="bold green")
+    console.print(
+        "Acoustics Analysis CLI — type 'help' or 'exit'\n"
+        "Scatter: scatter y:<col> [x:<col>] [smooth=loess|true|false] [frac=0.1] (default x=timestamp)",
+        style="bold green",
+    )
 
     interpreter = CommandInterpreter()
     executor = TaskExecutor(Path("config/settings.yaml"))
@@ -23,6 +27,17 @@ def main() -> None:
         except (EOFError, KeyboardInterrupt):
             console.print("\nBye!", style="bold yellow")
             break
+
+        # Ignore empty input lines to avoid unintended defaults
+        if not user_input.strip():
+            continue
+
+        # Add support for 'coords' command
+        if user_input.strip().lower() == "coords":
+            result = executor.execute({"task": "coords_info"})
+            style = "green" if result.ok else "red"
+            console.print(result.message, style=style)
+            continue
 
         cmd = interpreter.parse_command(user_input)
         ok, err = interpreter.validate_command(cmd)
