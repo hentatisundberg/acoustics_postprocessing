@@ -159,13 +159,50 @@ class CommandInterpreter:
             base.update(self._extract_transform_params(raw))
             return base
 
+        # Create calculated variable: "create var hour=timestamp.dt.hour" or "calc depth_m=depth/1000"
+        if s.startswith("create") or s.startswith("calc"):
+            # Pattern 1: "create var <name>=<expression>" or "calc <name>=<expression>"
+            m = re.search(r"(?:create\s+var\s+|calc\s+)(\w+)=(.+)", raw, flags=re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+                expression = m.group(2).strip()
+                return {"task": "create_variable", "name": name, "expression": expression}
+            
+            # Pattern 2: "create hour from timestamp" (temporal extraction shorthand)
+            m2 = re.search(r"create\s+(\w+)\s+from\s+(\w+)", raw, flags=re.IGNORECASE)
+            if m2:
+                attr_name = m2.group(1).strip().lower()
+                col_name = m2.group(2).strip()
+                # Map common temporal attributes
+                temporal_attrs = {
+                    "hour": "hour", "day": "day", "month": "month", "year": "year",
+                    "dayofweek": "dayofweek", "weekday": "dayofweek",
+                    "dayofyear": "dayofyear", "week": "isocalendar().week",
+                    "quarter": "quarter", "date": "date"
+                }
+                if attr_name in temporal_attrs:
+                    expression = f"{col_name}.dt.{temporal_attrs[attr_name]}"
+                    return {"task": "create_variable", "name": attr_name, "expression": expression}
+
         # list available columns (especially for plotting)
         if re.match(r"^(\s*(show|list)\s+)?columns\b", s) and "=" not in s:
             return {"task": "list_columns"}
 
+        # Statistics: check for time-aggregated stats first
         if s.startswith("stats") or "statistics" in s:
-            cols = self._find_list(raw, r"columns=([\w,]+)") or ["backscatter"]
-            return {"task": "compute_stats", "columns": cols}
+            # Check for "by time" or time interval pattern
+            interval = self._find_interval(s)
+            if interval or " by time" in s or "by_time" in s:
+                # Time-aggregated stats
+                cols = self._find_list(raw, r"columns=([\w,]+)") or ["backscatter"]
+                base = {"task": "compute_stats_by_time", "columns": cols, "interval": interval or "5min"}
+                base.update(self._extract_date_params(raw))
+                base.update(self._extract_transform_params(raw))
+                return base
+            else:
+                # Regular stats (no time aggregation)
+                cols = self._find_list(raw, r"columns=([\w,]+)") or ["backscatter"]
+                return {"task": "compute_stats", "columns": cols}
 
         if s in {"exit", "quit"}:
             return {"task": "exit"}
@@ -349,4 +386,30 @@ class CommandInterpreter:
                 params["xmax"] = float(xmax_c.group(1))
             except Exception:
                 pass
+        
+        # Outlier filtering parameters
+        # outlier_method or outliers: zscore/iqr/percentile
+        m_outlier = re.search(r"(outlier_method|outliers|outlier)=(zscore|iqr|percentile)", input_string, flags=re.IGNORECASE)
+        if m_outlier:
+            params["outlier_method"] = m_outlier.group(2).lower()
+        m_outlier_colon = re.search(r"(outlier_method|outliers|outlier):([^\s]+)", input_string, flags=re.IGNORECASE)
+        if m_outlier_colon and "outlier_method" not in params:
+            val = m_outlier_colon.group(2).lower()
+            if val in {"zscore", "iqr", "percentile"}:
+                params["outlier_method"] = val
+        
+        # z_thresh: threshold for zscore method (default 3.0)
+        m_zthresh = re.search(r"z_thresh=([0-9.+-]+)", input_string, flags=re.IGNORECASE)
+        if m_zthresh:
+            try:
+                params["z_thresh"] = float(m_zthresh.group(1))
+            except Exception:
+                pass
+        m_zthresh_c = re.search(r"z_thresh:([0-9.+-]+)", input_string, flags=re.IGNORECASE)
+        if m_zthresh_c and "z_thresh" not in params:
+            try:
+                params["z_thresh"] = float(m_zthresh_c.group(1))
+            except Exception:
+                pass
+        
         return params

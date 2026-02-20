@@ -9,6 +9,9 @@ A modular Python toolkit for loading, merging, aggregating, analyzing, plotting,
 - Time series and scatter plots with smoothing (LOWESS/Savitzky–Golay)
 - Interactive hexagon map export (HTML)
 - Descriptive statistics exported to text files
+- **Outlier filtering** using Z-score method for cleaner plots and statistics
+- **Calculated variables** for creating new columns (temporal features, arithmetic expressions) that persist in session
+- **Time-aggregated statistics** with detailed output for temporal pattern analysis
 - Interactive CLI with lightweight natural language parsing
 
 ## Quick Start
@@ -62,11 +65,16 @@ You’ll get an interactive prompt. Common commands:
 - Plot time series (optionally aggregate inline):
   - `plot y=bs 5min`
   - `plot scatter y=bs` (now supports custom x and y axes)
+  - `plot y=depth 5min outliers=zscore` (filter outliers, new in Feb 2026)
 - Hexagon map:
   - `map hex y=bs res=8` (now supports interactive matplotlib and folium backends)
   - `map hex y=bs res=8 coastline=path/to/sweden_coastline.geojson` (overlay Sweden coastline from GeoJSON or shapefile)
 - Descriptive statistics:
   - `stats columns=bs,temp`
+  - `stats by time 10min columns=bs,temp` (time-aggregated stats, new in Feb 2026)
+- Create calculated variables (new in Feb 2026):
+  - `create hour from timestamp` (extract hour from timestamp)
+  - `calc depth_m=depth/1000` (arithmetic expressions)
 - Help / Exit:
   - `help`  |  `exit`
 
@@ -134,7 +142,7 @@ map hex y=depth res=7
 map hex y=depth res=7 negative=true
 map hex y=depth res=6 east_lim=[600000,720000] north_lim=[6650000,6800000]
 map hex y=nasc0 res=6 east_lim=[600000,720000] north_lim=[6650000,6800000] max=1000
-scatter nasc0 vs depth 10min max=100
+scatter nasc0 vs depth 10min max=10000 outliers=zscore ylog=true
 scatter fish_depth0 vs depth 10min max=100
 
 boxplot y:nasc0 x:northing xbins:10 ylog=true 
@@ -144,6 +152,13 @@ map hex y=bottom_hardness negative=false res=7              # should revert to f
 map hex y=nasc0 res=7 max=1000
 map hex y=nasc0 res=7 max=100      # colorbar rescales to 100
 map hex y=depth negative:true      # legend label shows transformed column
+
+# New features (Feb 2026):
+create hour from timestamp                                  # Create temporal variable
+stats by time 10min columns=depth,nasc0 outliers=zscore    # Time-aggregated stats
+plot y=depth 5min outliers=zscore z_thresh=2.5             # Filter outliers in plots
+calc depth_negative=depth*-1                               # Create calculated variable
+scatter hour vs depth                                       # Plot using created variable
 
 
 
@@ -158,8 +173,91 @@ This works for both matplotlib and folium backends. The coastline file can be in
 - **Interactive matplotlib maps**: Use `map <variable>` for interactive maps with pan/zoom and colorbar. Add `backend:folium` for HTML maps.
 - **SWEREF99 coordinate support**: System now supports SWEREF99 TM (EPSG:3006) for analysis and mapping. Both WGS84 and SWEREF99 are stored and used as needed.
 - **Coordinate info command**: Use `coords info` or `show coords` to display current coordinate system details.
+- **Outlier filtering (Feb 2026)**: Filter extreme values using Z-score method before plotting or computing statistics. Example: `plot y=depth outliers=zscore z_thresh=2.5`.
+- **Calculated variables (Feb 2026)**: Create new variables from existing data that persist in the session. Extract temporal features (hour, day, month) or compute arithmetic expressions. Example: `create hour from timestamp` or `calc depth_m=depth/1000`.
+- **Time-aggregated statistics (Feb 2026)**: Compute descriptive statistics for each time bin with long-format output. Example: `stats by time 10min columns=depth,nasc0 outliers=zscore`.
 
 Note: If you do use a broad pattern like `*.txt`, the CLI now automatically excludes the positions file from the acoustic inputs to prevent mixing. Prefer targeting only acoustic files (e.g., `*.csv` or a specific prefix) to ensure expected measurement columns (e.g., `depth`, `nasc0`) are present.
+
+## Advanced Features
+
+### Outlier Filtering
+Remove statistical outliers from your data before plotting or analysis using Z-score method:
+
+```bash
+# Filter outliers from time series plot (default threshold: 3.0)
+plot y=depth 5min outliers=zscore
+
+# Use custom Z-score threshold (more aggressive filtering)
+plot y=nasc0 5min outliers=zscore z_thresh=2.5
+
+# Combine with other transforms
+scatter depth vs temperature outliers=zscore z_thresh=2.0 min=10 max=100
+
+# Filter outliers in maps
+map nasc0 res=7 outliers=zscore
+
+# Boxplot with outlier filtering
+boxplot y:depth x:latitude outliers=zscore z_thresh=3.0
+```
+
+**How it works**: The Z-score method removes data points that are more than N standard deviations from the mean (default N=3.0). This happens before min/max thresholds and other transforms.
+
+### Calculated Variables
+Create new variables that persist throughout your session. Extract temporal features or compute arithmetic expressions:
+
+```bash
+# Extract temporal features from timestamp
+create hour from timestamp        # Extract hour (0-23)
+create day from timestamp         # Extract day of month (1-31)
+create month from timestamp       # Extract month (1-12)
+create dayofweek from timestamp   # Extract day of week (0=Monday, 6=Sunday)
+
+# Arithmetic expressions using 'create var' or 'calc'
+calc depth_m=depth/1000          # Convert depth to meters
+create var bs_squared=backscatter*backscatter
+calc nasc_log=nasc0+1            # Offset before log transform
+
+# Use calculated variables in subsequent commands
+plot y=hour 5min                 # Plot by hour of day
+scatter hour vs depth            # Depth vs hour
+map bs_squared res=7             # Map the squared values
+stats columns=hour,dayofweek     # Stats on temporal variables
+```
+
+**Notes**: 
+- Variables persist until you exit the CLI
+- Use `.dt.` accessor for datetime attributes: `create var custom=timestamp.dt.year`
+- Arithmetic works with any numeric columns
+- Once created, variables appear in `columns` output
+
+### Time-Aggregated Statistics
+Compute descriptive statistics for each time bin with detailed output:
+
+```bash
+# Basic time-aggregated stats (default 5min intervals)
+stats by time 10min columns=depth
+
+# Multiple columns
+stats by time 5min columns=depth,nasc0,temperature
+
+# With outlier filtering
+stats by time 10min columns=depth outliers=zscore z_thresh=2.5
+
+# With date filtering
+stats by time 15min columns=nasc0 start_date=2025-10-23 end_date=2025-10-24
+
+# Combine all filters
+stats by time 5min columns=depth,nasc0 outliers=zscore start_date=2025-10-23
+```
+
+**Output format**:
+- **Text file** (`outputs/reports/stats_by_time_<interval>.txt`): Human-readable with stats grouped by time
+- **CSV file** (`outputs/reports/stats_by_time_<interval>.csv`): Long-format table for further analysis
+  - Columns: `timestamp`, `variable`, `count`, `mean`, `std`, `min`, `p05`, `p25`, `median`, `p75`, `p95`, `max`, `missing`
+  - Each row = one variable's stats for one time bin
+
+Perfect for tracking how your data changes over time or identifying temporal patterns!
 
 
 ## Custom Variables (Aliases)
@@ -177,3 +275,8 @@ You can plot, map, aggregate, and compute stats on any column by defining your o
 Notes:
 - Aliases are session-scoped (they persist until you exit the CLI).
 - If you prefer, you can skip `alias` entirely and pass the actual column name via `y=` and `columns=`.
+
+
+
+# Run examples
+plot y=nasc0 outliers=zscore z_thresh=.01

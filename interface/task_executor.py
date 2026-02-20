@@ -89,6 +89,8 @@ class TaskExecutor:
                     "min": command.get("min"),
                     "max": command.get("max"),
                     "lowess_frac": command.get("lowess_frac"),
+                    "outlier_method": command.get("outlier_method"),
+                    "z_thresh": command.get("z_thresh", 3.0),
                 }
                 return self._plot_time_series(
                     self._resolve_column(command["y"]),
@@ -112,6 +114,8 @@ class TaskExecutor:
                     "xmin": command.get("xmin"),
                     "xmax": command.get("xmax"),
                     "lowess_frac": command.get("lowess_frac"),
+                    "outlier_method": command.get("outlier_method"),
+                    "z_thresh": command.get("z_thresh", 3.0),
                 }
                 return self._plot_scatter(
                     command.get("x"),
@@ -134,6 +138,8 @@ class TaskExecutor:
                     "min": command.get("min"),
                     "max": command.get("max"),
                     "negative": command.get("negative", False),
+                    "outlier_method": command.get("outlier_method"),
+                    "z_thresh": command.get("z_thresh", 3.0),
                 }
                 return self._hex_map(
                     self._resolve_column(command["y"]),
@@ -149,6 +155,19 @@ class TaskExecutor:
             if task == "compute_stats":
                 cols = [self._resolve_column(c) for c in command["columns"]]
                 return self._compute_stats(cols)
+
+            if task == "compute_stats_by_time":
+                cols = [self._resolve_column(c) for c in command["columns"]]
+                opts = {
+                    "start_date": command.get("start_date"),
+                    "end_date": command.get("end_date"),
+                    "outlier_method": command.get("outlier_method"),
+                    "z_thresh": command.get("z_thresh", 3.0),
+                }
+                return self._compute_stats_by_time(cols, command["interval"], opts)
+
+            if task == "create_variable":
+                return self._create_variable(command.get("name"), command.get("expression"))
 
             if task == "list_columns":
                 return self._list_columns()
@@ -297,6 +316,8 @@ class TaskExecutor:
                 negative=bool(opts.get("negative", False)),
                 min_val=self._coerce_float(opts.get("min")),
                 max_val=self._coerce_float(opts.get("max")),
+                outlier_method=opts.get("outlier_method"),
+                z_thresh=float(opts.get("z_thresh", 3.0)),
             )
         except Exception:
             pass
@@ -354,6 +375,8 @@ class TaskExecutor:
                 negative=bool(opts.get("negative", False)),
                 min_val=self._coerce_float(opts.get("min")),
                 max_val=self._coerce_float(opts.get("max")),
+                outlier_method=opts.get("outlier_method"),
+                z_thresh=float(opts.get("z_thresh", 3.0)),
             )
         except Exception:
             pass
@@ -455,6 +478,8 @@ class TaskExecutor:
                 negative=bool(params.get("negative", False)),
                 min_val=self._coerce_float(params.get("min")),
                 max_val=self._coerce_float(params.get("max")),
+                outlier_method=params.get("outlier_method"),
+                z_thresh=float(params.get("z_thresh", 3.0)),
             )
         except Exception as e:
             return ExecutionResult(False, f"Transformation failed: {e}")
@@ -541,6 +566,8 @@ class TaskExecutor:
                 negative=bool(opts.get("negative", False)),
                 min_val=self._coerce_float(opts.get("min")),
                 max_val=self._coerce_float(opts.get("max")),
+                outlier_method=opts.get("outlier_method"),
+                z_thresh=float(opts.get("z_thresh", 3.0)),
             )
         except Exception:
             y_used = y
@@ -634,6 +661,104 @@ class TaskExecutor:
         self.stats.save_stats_to_file(stats, out)
         return ExecutionResult(True, f"Saved stats to {out}", artifact=out)
 
+    def _compute_stats_by_time(self, columns: list[str], interval: str, opts: Optional[Dict[str, Any]] = None) -> ExecutionResult:
+        """Compute descriptive statistics aggregated by time intervals."""
+        self._ensure_data()
+        opts = opts or {}
+        df = self.merged.copy()
+        
+        # Apply date filtering if specified
+        try:
+            df = self._filter_by_date_range(
+                df,
+                opts.get("start_date"),
+                opts.get("end_date"),
+            )
+        except Exception:
+            pass
+        
+        # Apply outlier filtering to each column if specified
+        outlier_method = opts.get("outlier_method")
+        z_thresh = float(opts.get("z_thresh", 3.0))
+        
+        if outlier_method == "zscore":
+            for col in columns:
+                if col in df.columns:
+                    try:
+                        result_df = self.stats.detect_outliers(df, col, method="zscore", z_thresh=z_thresh)
+                        if "outlier" in result_df.columns:
+                            # Filter out outliers for this column only
+                            mask = ~result_df["outlier"]
+                            df.loc[~mask, col] = np.nan
+                            if "outlier" in result_df.columns:
+                                # Clean up the outlier column if it exists
+                                df = df.drop(columns=["outlier"], errors="ignore")
+                    except Exception:
+                        pass
+        
+        # Calculate stats by time
+        stats = self.stats.calculate_stats_by_time(df, interval, columns)
+        
+        # Save to file
+        out = Path(f"outputs/reports/stats_by_time_{interval.replace(' ', '_')}.txt")
+        self.stats.save_stats_by_time_to_file(stats, out)
+        
+        csv_out = out.with_suffix(".csv")
+        return ExecutionResult(True, f"Saved time-aggregated stats to {out} and {csv_out}", artifact=out)
+
+    def _create_variable(self, name: str, expression: str) -> ExecutionResult:
+        """Create a new calculated variable and add it to the session data.
+        
+        Supports:
+        - Temporal extractions: timestamp.dt.hour, timestamp.dt.day, etc.
+        - Arithmetic: backscatter*2, depth+10, etc.
+        - pandas eval expressions
+        """
+        self._ensure_data()
+        if not name or not expression:
+            return ExecutionResult(False, "Both 'name' and 'expression' are required")
+        
+        if name in self.merged.columns:
+            return ExecutionResult(False, f"Variable '{name}' already exists. Choose a different name.")
+        
+        try:
+            # Handle datetime accessor patterns (e.g., timestamp.dt.hour)
+            if ".dt." in expression:
+                # Parse pattern like "timestamp.dt.hour"
+                parts = expression.split(".")
+                if len(parts) == 3 and parts[1] == "dt":
+                    col_name = parts[0]
+                    accessor = parts[2]
+                    if col_name not in self.merged.columns:
+                        return ExecutionResult(False, f"Column '{col_name}' not found")
+                    # Ensure datetime type
+                    if not pd.api.types.is_datetime64_any_dtype(self.merged[col_name]):
+                        self.merged[col_name] = pd.to_datetime(self.merged[col_name], errors="coerce")
+                    # Apply datetime accessor
+                    try:
+                        self.merged[name] = getattr(self.merged[col_name].dt, accessor)
+                    except AttributeError:
+                        return ExecutionResult(False, f"Invalid datetime accessor: {accessor}")
+                else:
+                    return ExecutionResult(False, f"Invalid datetime expression: {expression}")
+            else:
+                # Try pandas eval for arithmetic expressions
+                try:
+                    self.merged[name] = self.merged.eval(expression)
+                except Exception:
+                    # Fallback: try direct column operations
+                    # This handles simple cases like "backscatter*2"
+                    self.merged[name] = eval(expression, {"__builtins__": {}}, self.merged.to_dict("series"))
+            
+            # Verify the column was created
+            if name not in self.merged.columns:
+                return ExecutionResult(False, f"Failed to create variable '{name}'")
+            
+            return ExecutionResult(True, f"Created variable '{name}' from expression '{expression}'. {len(self.merged[name])} values.")
+        
+        except Exception as e:
+            return ExecutionResult(False, f"Error creating variable: {e}")
+
     def _list_columns(self) -> ExecutionResult:
         self._ensure_data()
         df = self.merged
@@ -663,34 +788,51 @@ class TaskExecutor:
             "    Transforms & limits:\n"
             "      - Y axis: log/min/max/negative (e.g., log=true min=50 max=500 negative=true). 'negative=true' flips sign (depth → -depth) for downward axes.\n"
             "      - X axis: xlog/xmin/xmax (e.g., xlog=true xmin=1)\n"
+            "      - Outlier filtering: outliers=zscore z_thresh=3.0 (default threshold is 3.0)\n"
             "      - Syntax: both '=' and ':' are accepted (log:true)\n"
-            "      - Order: date filter → thresholds → negative → log (≤0 excluded before log)\n"
+            "      - Order: outlier filter → date filter → thresholds → negative → log (≤0 excluded before log)\n"
             "      - Note: x-axis transforms are ignored when x=timestamp\n"
             "  scatter <y_col> vs <x_col>\n"
             "  scatter x:<x_col> y:<y_col>\n"
             "    If the specified column is missing, the CLI will choose a numeric column automatically (prefers 'backscatter' or 'depth').\n"
-            "  boxplot y:<column> [x:<group_col>] [start_date=YYYY-MM-DD] [end_date=YYYY-MM-DD] [log=true|false] [min=<v>] [max=<v>] [show] [save] [out=<path>]  # boxplot\n"
+            "  boxplot y:<column> [x:<group_col>] [start_date=YYYY-MM-DD] [end_date=YYYY-MM-DD] [log=true|false] [min=<v>] [max=<v>] [outliers=zscore] [show] [save] [out=<path>]  # boxplot\n"
             "    - Groups by 'x' if provided; otherwise single-series boxplot\n"
             "    - If 'x' is continuous, you can bin it with 'xbins:<n>' (equal-width) or 'xqbins:<n>' (quantiles)\n"
-            "    - Applies the same Y transforms (log/min/max) and date filtering\n"
+            "    - Applies the same Y transforms (log/min/max), outlier filtering, and date filtering\n"
             "  columns                               # list plottable numeric columns and aliases\n"
             "  map <variable> [resolution:<n>] [agg:<func>] [backend:matplotlib|folium] [east_lim=[x1,x2]] [north_lim=[y1,y2]]  # spatial map\n"
-            "    - Applies date filters and min/max thresholds before hex aggregation\n"
+            "    - Applies date filters, outlier filtering, and min/max thresholds before hex aggregation\n"
             "    - Supports 'negative=true' prior to aggregation (e.g., map depth negative=true)\n"
             "    - Transforms/limits are per-command and do not persist; omit them to use defaults (no transform, full range).\n"
-            "  stats columns=<alias|column>[,<alias|column>...]\n"
+            "  stats columns=<alias|column>[,<alias|column>...]  # descriptive statistics\n"
+            "  stats by time <interval> columns=<col>[,<col>...] [outliers=zscore] [start_date=...] [end_date=...]  # stats by time aggregation\n"
+            "    - Computes statistics for each time bin (long-format output)\n"
+            "    - Supports outlier filtering and date filtering\n"
+            "    - Saves both CSV and readable text format\n"
+            "  create var <name>=<expression>        # create calculated variable (persists in session)\n"
+            "  calc <name>=<expression>              # alias for 'create var'\n"
+            "  create <attr> from timestamp          # temporal extraction shorthand (hour, day, month, year, dayofweek, etc.)\n"
+            "    Examples:\n"
+            "      create var hour=timestamp.dt.hour\n"
+            "      calc depth_m=depth/1000\n"
+            "      create hour from timestamp\n"
+            "      calc bs2=backscatter*2\n"
             "  coords info                            # show coordinate system info and columns\n"
             "Examples:\n"
             "  alias bs=backscatter temp=temp_water\n"
             "  plot y=bs 5min smooth=loess frac=0.15 show=true save=true out=outputs/plots/bs_5min.png\n"
-            "  scatter depth vs temperature smooth=loess frac=0.1\n"
+            "  scatter depth vs temperature smooth=loess frac=0.1 outliers=zscore z_thresh=2.5\n"
             "  scatter x:salinity y:depth xlog:true xmin:1e-3 xmax:1e2 save:true show:false\n"
-            "  boxplot y:backscatter x:depth xbins:10 start_date:2024-10-06 end_date:2024-10-07 log:true min:50 max:200 save:true\n"
+            "  boxplot y:backscatter x:depth xbins:10 start_date:2024-10-06 end_date:2024-10-07 log:true min:50 max:200 outliers:zscore save:true\n"
             "  map depth\n"
-            "  map depth backend:folium\n"
+            "  map depth backend:folium outliers=zscore\n"
             "  map depth resolution:9 agg:max\n"
             "  map depth negative:true min:5 max:50\n"
             "  stats columns=bs,temp\n"
+            "  stats by time 10min columns=backscatter,depth outliers=zscore\n"
+            "  create var hour=timestamp.dt.hour\n"
+            "  create hour from timestamp\n"
+            "  calc depth_negative=depth*-1\n"
             "  coords info\n"
             "  help | exit\n"
         )
@@ -760,10 +902,13 @@ class TaskExecutor:
         negative: bool = False,
         min_val: float | None = None,
         max_val: float | None = None,
+        outlier_method: str | None = None,
+        z_thresh: float = 3.0,
     ) -> tuple[pd.DataFrame, str]:
-        """Apply min/max filtering and optional natural log transform on a column.
+        """Apply outlier filtering, min/max filtering and optional natural log transform on a column.
 
         Returns the (possibly filtered) dataframe and the column name to use (new name if log).
+        Order: outlier filter → date filter → thresholds → negative → log
         """
         if column not in data.columns:
             raise ValueError(f"Column '{column}' not in data")
@@ -771,6 +916,14 @@ class TaskExecutor:
         # Ensure numeric
         if not pd.api.types.is_numeric_dtype(df[column]):
             df[column] = pd.to_numeric(df[column], errors="coerce")
+        
+        # Outlier filtering (before min/max thresholds)
+        if outlier_method == "zscore":
+            result_df = self.stats.detect_outliers(df, column, method="zscore", z_thresh=z_thresh)
+            if "outlier" in result_df.columns:
+                df = result_df.loc[~result_df["outlier"]].copy()
+                df = df.drop(columns=["outlier"], errors="ignore")
+        
         # Threshold filters
         if min_val is not None:
             df = df.loc[df[column] >= float(min_val)].copy()
