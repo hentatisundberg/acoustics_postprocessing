@@ -41,7 +41,7 @@ These instructions help AI coding agents work effectively in this repository by 
   - Aggregate: `aggregate time 5min y:<col>`
   - Plot line: `plot y:<col> 5min [smooth=loess|savgol|rolling]`
   - Scatter: `scatter <y> [vs <x>] [smooth=true|false|loess]`
-  - Boxplot: `boxplot y:<col> [x:<group>] [xbins:<n>|xqbins:<n>]`
+  - Boxplot: `boxplot <y> vs <x> [xbins:<n>|xqbins:<n>]` or `boxplot y:<col> [x:<group>]`
   - Map: `map <variable> [resolution:<n>] [backend:matplotlib|folium] [east_lim=[x1,x2]] [north_lim=[y1,y2]]`
   - Stats: `stats columns=a,b`
   - Aliases: `alias bs=backscatter temp=temp_water` (persist in session)
@@ -79,4 +79,4 @@ These instructions help AI coding agents work effectively in this repository by 
 If anything is unclear or missing (e.g., additional test commands, data schemas), tell us what you need and we’ll refine these instructions.
 
 # Use of virtual environments
-When suggesting code executions, always ensure that the are run withing the project's virtual environment to maintain dependency consistency. That is, every time something should be executed, the path is supposed to be: /Users/jonas/Documents/Programming/python/acoustics_postprocessing/.venv/bin/python <program_to_run>
+When suggesting code executions, always ensure that the are run withing the project's virtual environment to maintain dependency consistency. That is, every time something should be executed, the path is supposed to be: /Users/jonas/Documents/Programming/python/acoustics_postprocessing/.venv/bin/python3 <program_to_run>

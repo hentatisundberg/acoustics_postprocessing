@@ -31,6 +31,11 @@ class CommandInterpreter:
             # y: required, x/group: optional
             y = self._find_param(raw, ["y"])  # required unless using shorthand
             x = self._find_param(raw, ["x", "group"])  # optional
+            # Support 'boxplot y vs x' syntax
+            vs_match = re.search(r"boxplot\s+(\w+)\s+vs\s+(\w+)", raw, re.IGNORECASE)
+            if vs_match:
+                y = vs_match.group(1)
+                x = vs_match.group(2)
             # Shorthand: boxplot <column>
             if not y:
                 m = re.match(r"boxplot\s+(\w+)", raw, flags=re.IGNORECASE)
@@ -39,6 +44,10 @@ class CommandInterpreter:
             params: Dict[str, Any] = {"task": "plot_boxplot", "y": y}
             if x:
                 params["x"] = x
+            # Extract temporal aggregation interval (e.g., 5min, 10min, 1h)
+            interval = self._find_interval(raw)
+            if interval:
+                params["interval"] = interval
             # Common params: dates and transforms
             params.update(self._extract_date_params(raw))
             params.update(self._extract_transform_params(raw))
@@ -109,6 +118,13 @@ class CommandInterpreter:
             params = {k.lower(): v for k, v in pairs}
             return {"task": "load", "params": params}
 
+        if s.startswith("analysis"):
+            key = self._find_param(raw, ["key", "param", "name"])
+            if not key:
+                remainder = raw[len("analysis"):].strip()
+                key = remainder if remainder else None
+            return {"task": "analysis_params", "key": key}
+
         if "plot" in s or s.startswith("plot"):
             interval = self._find_interval(s)
             y = self._find_param(raw, ["y", "column", "value", "backscatter"]) or "backscatter"
@@ -121,6 +137,11 @@ class CommandInterpreter:
                     x = vs_match.group(2)
             if not x:
                 x = "timestamp"
+            # Allow shorthand 'plot <column>' when no y=... parameter is given
+            if y == "backscatter":
+                simple_match = re.match(r"plot\s+(\w+)(?=\s|$)", raw, flags=re.IGNORECASE)
+                if simple_match:
+                    y = simple_match.group(1)
             # Parse smooth mode as bool or string
             smooth = self._find_param(raw, ["smooth"])  # optional
             # Optional LOWESS fraction (0-1)
@@ -238,12 +259,12 @@ class CommandInterpreter:
         Returns the first match found, case-insensitive.
         """
         for k in keys:
-            # Try equals syntax: key=value
-            m = re.search(rf"{k}=([^\s]+)", raw, flags=re.IGNORECASE)
+            pattern = rf"(?<![\w]){re.escape(k)}=([^\s]+)"
+            m = re.search(pattern, raw, flags=re.IGNORECASE)
             if m:
                 return m.group(1)
-            # Try colon syntax: key:value
-            m2 = re.search(rf"{k}:([^\s]+)", raw, flags=re.IGNORECASE)
+            pattern_colon = rf"(?<![\w]){re.escape(k)}:([^\s]+)"
+            m2 = re.search(pattern_colon, raw, flags=re.IGNORECASE)
             if m2:
                 return m2.group(1)
         return None
@@ -317,6 +338,15 @@ class CommandInterpreter:
         if m_colon and "log" not in params:
             val = m_colon.group(1).lower()
             params["log"] = val in {"true", "yes", "1"}
+        # Support 'logy' alias to avoid y being treated as columns in plot commands
+        m_logy = re.search(r"logy=(true|false|yes|no|1|0)", input_string, flags=re.IGNORECASE)
+        if m_logy and "log" not in params:
+            val = m_logy.group(1).lower()
+            params["log"] = val in {"true", "yes", "1"}
+        m_logy_colon = re.search(r"logy:([^\s]+)", input_string, flags=re.IGNORECASE)
+        if m_logy_colon and "log" not in params:
+            val = m_logy_colon.group(1).lower()
+            params["log"] = val in {"true", "yes", "1"}
         # Negative transform (alias: neg)
         m_neg = re.search(r"(negative|neg)=(true|false|yes|no|1|0)", input_string, flags=re.IGNORECASE)
         if m_neg:
@@ -388,14 +418,18 @@ class CommandInterpreter:
                 pass
         
         # Outlier filtering parameters
-        # outlier_method or outliers: zscore/iqr/percentile
-        m_outlier = re.search(r"(outlier_method|outliers|outlier)=(zscore|iqr|percentile)", input_string, flags=re.IGNORECASE)
+        # outlier_method or outliers: zscore/iqr/percentile/modified_zscore
+        m_outlier = re.search(
+            r"(outlier_method|outliers|outlier)=(zscore|iqr|percentile|modified[_-]?zscore|mzscore)",
+            input_string,
+            flags=re.IGNORECASE,
+        )
         if m_outlier:
             params["outlier_method"] = m_outlier.group(2).lower()
         m_outlier_colon = re.search(r"(outlier_method|outliers|outlier):([^\s]+)", input_string, flags=re.IGNORECASE)
         if m_outlier_colon and "outlier_method" not in params:
             val = m_outlier_colon.group(2).lower()
-            if val in {"zscore", "iqr", "percentile"}:
+            if val in {"zscore", "iqr", "percentile", "modified_zscore", "modified-zscore", "mzscore"}:
                 params["outlier_method"] = val
         
         # z_thresh: threshold for zscore method (default 3.0)

@@ -49,10 +49,10 @@ if __name__ == "__main__":
     if not res2.ok:
         raise SystemExit(1)
     
-    # Test 3: Boxplot with outlier filtering
-    print("\n=== Test 3: Boxplot with outlier filtering ===")
+    # Test 3: Boxplot with outlier filtering (using new y vs x syntax with xbins)
+    print("\n=== Test 3: Boxplot with outlier filtering ===\")
     cmd3 = interpreter.parse_command(
-        f"boxplot y:{ycol} outliers=zscore save=true show=false out=outputs/plots/smoke_outlier_boxplot.png"
+        f"boxplot {ycol} vs latitude xbins=5 outliers=zscore save=true show=false out=outputs/plots/smoke_outlier_boxplot.png"
     )
     res3 = executor.execute(cmd3)
     print(res3.message)

@@ -57,6 +57,12 @@ class StatisticsCalculator:
         elif method == "zscore":
             z = (s - s.mean()) / s.std(ddof=0)
             mask = z.abs() > z_thresh
+        elif method in {"modified_zscore", "modified-zscore", "mzscore"}:
+            median = s.median()
+            mad = (s - median).abs().median()
+            if mad and not np.isnan(mad):
+                modified_z = 0.6745 * (s - median) / mad
+                mask = modified_z.abs() > z_thresh
         return data.assign(outlier=mask)
 
     def calculate_stats_by_time(self, data: pd.DataFrame, interval: str, columns: List[str], timestamp_col: str = "timestamp") -> pd.DataFrame:

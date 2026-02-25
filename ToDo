@@ -1,4 +1,14 @@
 
 
-# Implement another thresholding that builds on some othr method, as z score is not working with few extreme values
+# Method for fish abundance calculation 
+# Add potential to set variables 
 
+# Key parameter values 
+TS_mean = -46.2 # 20 cm herring at 38 kHz, dB re 1 m2
+mean_length = 20 # cm 
+mean_weight = 0.0059*mean_length**3.09 # grams
+
+sigma_mean = 10**(TS_mean/10) # Average backscattering cross section 
+abund_nmi = nasc0/sigma # Fish abundance (fish per nmi**2) 
+abund_km2 = abund_nmi / (1852*1852) # Fish abundance (fish per km2)
+tonnes_km2 = abund_km2 * mean_weight / (1000*1000) # metric tonnes per km2

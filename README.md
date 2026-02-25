@@ -143,15 +143,16 @@ map hex y=depth res=7 negative=true
 map hex y=depth res=6 east_lim=[600000,720000] north_lim=[6650000,6800000]
 map hex y=nasc0 res=6 east_lim=[600000,720000] north_lim=[6650000,6800000] max=1000
 scatter nasc0 vs depth 10min max=10000 outliers=zscore ylog=true
-scatter fish_depth0 vs depth 10min max=100
+scatter fish_depth0 vs depth 10min max=100 
 
-boxplot y:nasc0 x:northing xbins:10 ylog=true 
-
-map hex y=depth res=7 max=50
+map hex y=depth res=6 max=100
 map hex y=bottom_hardness negative=false res=7              # should revert to full data scale (no carry-over max)
-map hex y=nasc0 res=7 max=1000
+map hex y=nasc0 10min res=7 max=1000
 map hex y=nasc0 res=7 max=100      # colorbar rescales to 100
 map hex y=depth negative:true      # legend label shows transformed column
+
+boxplot depth vs latitude          # depth vs latitude
+boxplot nasc0 vs hour outliers=zscore z_thresh=3.0
 
 # New features (Feb 2026):
 create hour from timestamp                                  # Create temporal variable
@@ -159,9 +160,6 @@ stats by time 10min columns=depth,nasc0 outliers=zscore    # Time-aggregated sta
 plot y=depth 5min outliers=zscore z_thresh=2.5             # Filter outliers in plots
 calc depth_negative=depth*-1                               # Create calculated variable
 scatter hour vs depth                                       # Plot using created variable
-
-
-
 
 ```
 
@@ -189,16 +187,18 @@ Remove statistical outliers from your data before plotting or analysis using Z-s
 plot y=depth 5min outliers=zscore
 
 # Use custom Z-score threshold (more aggressive filtering)
-plot y=nasc0 5min outliers=zscore z_thresh=2.5
+plot y=nasc0 10min outliers=modified_zscore z_thresh=1000
+plot y=nasc0 10min ylog=true outliers=modified_zscore z_thresh=10
+
 
 # Combine with other transforms
-scatter depth vs temperature outliers=zscore z_thresh=2.0 min=10 max=100
+scatter depth vs temperature outliers=modified_score z_thresh=2.0
 
 # Filter outliers in maps
 map nasc0 res=7 outliers=zscore
 
 # Boxplot with outlier filtering
-boxplot y:depth x:latitude outliers=zscore z_thresh=3.0
+boxplot depth vs latitude outliers=zscore z_thresh=3.0
 ```
 
 **How it works**: The Z-score method removes data points that are more than N standard deviations from the mean (default N=3.0). This happens before min/max thresholds and other transforms.
@@ -215,12 +215,15 @@ create dayofweek from timestamp   # Extract day of week (0=Monday, 6=Sunday)
 
 # Arithmetic expressions using 'create var' or 'calc'
 calc depth_m=depth/1000          # Convert depth to meters
-create var bs_squared=backscatter*backscatter
 calc nasc_log=nasc0+1            # Offset before log transform
 
+# Echo integration calculations
+calc abund_km2=(nasc0/(10**(-46.2/10)))/(1852*1852)  # sigma
+calc tonnes_km2=abund_km2*0.0059*20**3.09/(1000*1000)
+
 # Use calculated variables in subsequent commands
-plot y=hour 5min                 # Plot by hour of day
-scatter hour vs depth            # Depth vs hour
+plot y=tonnes_km2 10min outliers=modified_zscore z_thresh=100                 # Plot by hour of day
+boxplot nasc0 vs hour 30min logy=true outliers=modified_zscore z_thresh=100   # NASC0 vs hour
 map bs_squared res=7             # Map the squared values
 stats columns=hour,dayofweek     # Stats on temporal variables
 ```

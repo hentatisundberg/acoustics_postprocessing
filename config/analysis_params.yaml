@@ -1,0 +1,9 @@
+# Analysis settings for echo integration etc
+
+integration:
+  weight_lengthA: 0.0059
+  weight_lengthB: 3.09 # Weight = a * length ** b
+  mean_length: 20 # cm
+  TS_mean: -46.2
+  conv_nmi2_km2: 1.852**2 # Conversion factor from nmi^2 to km^2
+  sigma_mean: 4 * 3.141592653589793 * 10**(TS_mean/10)

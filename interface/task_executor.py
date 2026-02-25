@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -29,10 +30,11 @@ class ExecutionResult:
     ok: bool
     message: str
     artifact: Optional[Path] = None
+    data: Optional[pd.DataFrame] = None
 
 
 class TaskExecutor:
-    def __init__(self, config_path: Path = Path("config/settings.yaml")):
+    def __init__(self, config_path: Path = Path("config/settings.yaml"), analysis_params_path: Path | None = None):
         self.config = read_config(config_path)
         setup_logging(self.config.get("logging", {}).get("level", "INFO"))
         self.data: Optional[pd.DataFrame] = None
@@ -48,6 +50,16 @@ class TaskExecutor:
             "pattern": self.config["data"]["acoustic_csv_pattern"],
             "positions": self.config["data"]["position_file"],
         }
+        self.last_stats_dataset: Optional[pd.DataFrame] = None
+        analysis_file = analysis_params_path or config_path.parent / "analysis_params.yaml"
+        self.analysis_params: Dict[str, Any] = {}
+        self.analysis_context: Dict[str, Any] = {}
+        if analysis_file.exists():
+            self.analysis_params = read_config(analysis_file) or {}
+            self.analysis_context = self._build_analysis_context(self.analysis_params)
+            self._evaluate_analysis_expressions()
+        else:
+            logger.debug("Analysis params file not found at %s", analysis_file)
         # User-defined CLI variable aliases, e.g., {"bs": "backscatter"}
         self.aliases: Dict[str, str] = {}
 
@@ -168,6 +180,9 @@ class TaskExecutor:
 
             if task == "create_variable":
                 return self._create_variable(command.get("name"), command.get("expression"))
+
+            if task == "analysis_params":
+                return self._analysis_params(command.get("key"))
 
             if task == "list_columns":
                 return self._list_columns()
@@ -426,7 +441,7 @@ class TaskExecutor:
     def _plot_boxplot(self, params: Dict[str, Any]) -> ExecutionResult:
         """Execute boxplot plotting with optional grouping and transforms.
 
-        Expected params keys: 'y' (required), optional 'x'/'group', and date/transform keys.
+        Expected params keys: 'y' (required), optional 'x'/'group', 'interval', and date/transform keys.
         """
         self._ensure_data()
         df = self.merged.copy()
@@ -446,6 +461,20 @@ class TaskExecutor:
             return ExecutionResult(False, "Parameter 'y' is required for boxplot")
         y = self._resolve_column(y_col_in)
         x = self._resolve_column(x_col_in) if x_col_in else None
+
+        # Apply temporal aggregation if interval is provided
+        interval = params.get("interval")
+        if interval:
+            # Determine aggregation columns: always include y, and x if it's not categorical
+            agg_dict = {y: "mean"}
+            if x and x in df.columns:
+                # If x is numeric, aggregate it; otherwise preserve as group
+                if pd.api.types.is_numeric_dtype(df[x]):
+                    agg_dict[x] = "mean"
+            try:
+                df = self.temporal.aggregate_by_time(df, interval, agg_dict)
+            except Exception as e:
+                return ExecutionResult(False, f"Temporal aggregation failed: {e}")
 
         # Optional: bin continuous x into categories for grouped boxplots
         xbins_val = self._coerce_int(params.get("xbins"))
@@ -681,11 +710,15 @@ class TaskExecutor:
         outlier_method = opts.get("outlier_method")
         z_thresh = float(opts.get("z_thresh", 3.0))
         
-        if outlier_method == "zscore":
+        if isinstance(outlier_method, str):
+            outlier_method = outlier_method.lower()
+        normalized_method = outlier_method.replace("-", "_") if isinstance(outlier_method, str) else outlier_method
+        if normalized_method in {"zscore", "modified_zscore", "mzscore"}:
+            method = "modified_zscore" if normalized_method in {"modified_zscore", "mzscore"} else "zscore"
             for col in columns:
                 if col in df.columns:
                     try:
-                        result_df = self.stats.detect_outliers(df, col, method="zscore", z_thresh=z_thresh)
+                        result_df = self.stats.detect_outliers(df, col, method=method, z_thresh=z_thresh)
                         if "outlier" in result_df.columns:
                             # Filter out outliers for this column only
                             mask = ~result_df["outlier"]
@@ -704,7 +737,12 @@ class TaskExecutor:
         self.stats.save_stats_by_time_to_file(stats, out)
         
         csv_out = out.with_suffix(".csv")
-        return ExecutionResult(True, f"Saved time-aggregated stats to {out} and {csv_out}", artifact=out)
+        self.last_stats_dataset = stats
+        message = (
+            f"Saved time-aggregated stats to {out} and {csv_out}. "
+            "Dataset attached to this result and stored on executor.last_stats_dataset."
+        )
+        return ExecutionResult(True, message, artifact=out, data=stats)
 
     def _create_variable(self, name: str, expression: str) -> ExecutionResult:
         """Create a new calculated variable and add it to the session data.
@@ -717,45 +755,37 @@ class TaskExecutor:
         self._ensure_data()
         if not name or not expression:
             return ExecutionResult(False, "Both 'name' and 'expression' are required")
-        
+
         if name in self.merged.columns:
             return ExecutionResult(False, f"Variable '{name}' already exists. Choose a different name.")
-        
+
         try:
-            # Handle datetime accessor patterns (e.g., timestamp.dt.hour)
             if ".dt." in expression:
-                # Parse pattern like "timestamp.dt.hour"
-                parts = expression.split(".")
-                if len(parts) == 3 and parts[1] == "dt":
-                    col_name = parts[0]
-                    accessor = parts[2]
-                    if col_name not in self.merged.columns:
-                        return ExecutionResult(False, f"Column '{col_name}' not found")
-                    # Ensure datetime type
-                    if not pd.api.types.is_datetime64_any_dtype(self.merged[col_name]):
-                        self.merged[col_name] = pd.to_datetime(self.merged[col_name], errors="coerce")
-                    # Apply datetime accessor
-                    try:
-                        self.merged[name] = getattr(self.merged[col_name].dt, accessor)
-                    except AttributeError:
-                        return ExecutionResult(False, f"Invalid datetime accessor: {accessor}")
-                else:
-                    return ExecutionResult(False, f"Invalid datetime expression: {expression}")
-            else:
-                # Try pandas eval for arithmetic expressions
+                col_name = expression.split(".dt.", 1)[0].strip()
+                if col_name not in self.merged.columns:
+                    return ExecutionResult(False, f"Column '{col_name}' not found")
+                if not pd.api.types.is_datetime64_any_dtype(self.merged[col_name]):
+                    self.merged[col_name] = pd.to_datetime(self.merged[col_name], errors="coerce")
+                eval_context = {col_name: self.merged[col_name], **self.analysis_context}
                 try:
-                    self.merged[name] = self.merged.eval(expression)
+                    self.merged[name] = eval(expression, {"__builtins__": {}}, eval_context)
+                except Exception as exc:
+                    return ExecutionResult(False, f"Invalid datetime expression: {expression} ({exc})")
+            else:
+                try:
+                    self.merged[name] = self.merged.eval(expression, local_dict=self.analysis_context)
                 except Exception:
-                    # Fallback: try direct column operations
-                    # This handles simple cases like "backscatter*2"
-                    self.merged[name] = eval(expression, {"__builtins__": {}}, self.merged.to_dict("series"))
-            
-            # Verify the column was created
+                    eval_context = {**self.analysis_context, **self.merged.to_dict("series")}
+                    try:
+                        self.merged[name] = eval(expression, {"__builtins__": {}}, eval_context)
+                    except Exception as exc:
+                        return ExecutionResult(False, f"Failed to evaluate expression '{expression}': {exc}")
+
             if name not in self.merged.columns:
                 return ExecutionResult(False, f"Failed to create variable '{name}'")
-            
+
             return ExecutionResult(True, f"Created variable '{name}' from expression '{expression}'. {len(self.merged[name])} values.")
-        
+
         except Exception as e:
             return ExecutionResult(False, f"Error creating variable: {e}")
 
@@ -776,6 +806,114 @@ class TaskExecutor:
             msg += "\n" + "\n".join(alias_lines)
         return ExecutionResult(True, msg)
 
+    def _analysis_params(self, key: str | None = None) -> ExecutionResult:
+        if not self.analysis_params:
+            return ExecutionResult(False, "No analysis parameters loaded.")
+        if key:
+            value = self._get_analysis_param_value(key)
+            if value is None:
+                return ExecutionResult(False, f"Analysis parameter '{key}' not found.")
+            return ExecutionResult(True, f"{key}: {value}")
+        lines = self._format_analysis_params(self.analysis_params)
+        return ExecutionResult(True, "Analysis parameters:\n" + "\n".join(lines))
+
+    def _build_analysis_context(self, data: Any) -> Dict[str, Any]:
+        context: Dict[str, Any] = {}
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    context[key] = self._namespace_from_dict(value)
+                    context.update(self._build_analysis_context(value))
+                else:
+                    context[key] = self._wrap_analysis_value(value)
+        elif isinstance(data, list):
+            for idx, value in enumerate(data):
+                list_key = f"list_{idx}"
+                context.update(self._build_analysis_context({list_key: value}))
+        return context
+
+    def _wrap_analysis_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return self._namespace_from_dict(value)
+        if isinstance(value, list):
+            return [self._wrap_analysis_value(v) for v in value]
+        return self._evaluate_analysis_value(value)
+
+    def _namespace_from_dict(self, data: Dict[str, Any]) -> SimpleNamespace:
+        processed: Dict[str, Any] = {}
+        for key, value in data.items():
+            processed[key] = self._wrap_analysis_value(value)
+        return SimpleNamespace(**processed)
+
+    def _evaluate_analysis_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return eval(value, {"__builtins__": {}}, {})
+            except Exception:
+                return value
+        return value
+
+    def _format_analysis_params(self, data: Any, indent: int = 0) -> list[str]:
+        lines: list[str] = []
+        prefix = "  " * indent
+        if isinstance(data, dict):
+            for name, value in data.items():
+                if isinstance(value, (dict, list)):
+                    lines.append(f"{prefix}{name}:")
+                    lines.extend(self._format_analysis_params(value, indent + 1))
+                else:
+                    lines.append(f"{prefix}{name}: {value}")
+        elif isinstance(data, list):
+            for item in data:
+                lines.extend(self._format_analysis_params(item, indent))
+        else:
+            lines.append(f"{prefix}{data}")
+        return lines
+
+    def _evaluate_analysis_expressions(self) -> None:
+        if not self.analysis_context:
+            return
+        pending = {key: value for key, value in self.analysis_context.items() if isinstance(value, str)}
+        progress = True
+        while pending and progress:
+            progress = False
+            for key in list(pending):
+                expr = pending[key]
+                try:
+                    result = eval(expr, {"__builtins__": {}}, self.analysis_context)
+                except Exception:
+                    continue
+                self.analysis_context[key] = result
+                self._sync_analysis_namespaces(key, result)
+                del pending[key]
+                progress = True
+
+    def _sync_analysis_namespaces(self, key: str, value: Any) -> None:
+        for entry in self.analysis_context.values():
+            self._apply_value_to_namespace(entry, key, value)
+
+    def _apply_value_to_namespace(self, obj: Any, key: str, value: Any) -> None:
+        if isinstance(obj, SimpleNamespace):
+            if hasattr(obj, key):
+                setattr(obj, key, value)
+            for child in vars(obj).values():
+                self._apply_value_to_namespace(child, key, value)
+        elif isinstance(obj, dict):
+            for child in obj.values():
+                self._apply_value_to_namespace(child, key, value)
+
+    def _get_analysis_param_value(self, key: str) -> Any | None:
+        parts = [segment.strip() for segment in key.replace(" ", ".").split(".") if segment.strip()]
+        current: Any = self.analysis_params
+        for part in parts:
+            if not isinstance(current, dict):
+                return None
+            match = next((k for k in current if k.lower() == part.lower()), None)
+            if match is None:
+                return None
+            current = current[match]
+        return current
+
     def help_text(self) -> str:
         return (
             "Commands:\n"
@@ -788,14 +926,14 @@ class TaskExecutor:
             "    Transforms & limits:\n"
             "      - Y axis: log/min/max/negative (e.g., log=true min=50 max=500 negative=true). 'negative=true' flips sign (depth → -depth) for downward axes.\n"
             "      - X axis: xlog/xmin/xmax (e.g., xlog=true xmin=1)\n"
-            "      - Outlier filtering: outliers=zscore z_thresh=3.0 (default threshold is 3.0)\n"
+            "      - Outlier filtering: outliers=zscore|modified_zscore z_thresh=3.0 (default threshold is 3.0)\n"
             "      - Syntax: both '=' and ':' are accepted (log:true)\n"
             "      - Order: outlier filter → date filter → thresholds → negative → log (≤0 excluded before log)\n"
             "      - Note: x-axis transforms are ignored when x=timestamp\n"
             "  scatter <y_col> vs <x_col>\n"
             "  scatter x:<x_col> y:<y_col>\n"
             "    If the specified column is missing, the CLI will choose a numeric column automatically (prefers 'backscatter' or 'depth').\n"
-            "  boxplot y:<column> [x:<group_col>] [start_date=YYYY-MM-DD] [end_date=YYYY-MM-DD] [log=true|false] [min=<v>] [max=<v>] [outliers=zscore] [show] [save] [out=<path>]  # boxplot\n"
+            "  boxplot y:<column> [x:<group_col>] [start_date=YYYY-MM-DD] [end_date=YYYY-MM-DD] [log=true|false] [min=<v>] [max=<v>] [outliers=zscore|modified_zscore] [show] [save] [out=<path>]  # boxplot\n"
             "    - Groups by 'x' if provided; otherwise single-series boxplot\n"
             "    - If 'x' is continuous, you can bin it with 'xbins:<n>' (equal-width) or 'xqbins:<n>' (quantiles)\n"
             "    - Applies the same Y transforms (log/min/max), outlier filtering, and date filtering\n"
@@ -805,7 +943,7 @@ class TaskExecutor:
             "    - Supports 'negative=true' prior to aggregation (e.g., map depth negative=true)\n"
             "    - Transforms/limits are per-command and do not persist; omit them to use defaults (no transform, full range).\n"
             "  stats columns=<alias|column>[,<alias|column>...]  # descriptive statistics\n"
-            "  stats by time <interval> columns=<col>[,<col>...] [outliers=zscore] [start_date=...] [end_date=...]  # stats by time aggregation\n"
+            "  stats by time <interval> columns=<col>[,<col>...] [outliers=zscore|modified_zscore] [start_date=...] [end_date=...]  # stats by time aggregation\n"
             "    - Computes statistics for each time bin (long-format output)\n"
             "    - Supports outlier filtering and date filtering\n"
             "    - Saves both CSV and readable text format\n"
@@ -818,10 +956,11 @@ class TaskExecutor:
             "      create hour from timestamp\n"
             "      calc bs2=backscatter*2\n"
             "  coords info                            # show coordinate system info and columns\n"
+            "  analysis [key]                         # show analysis parameters (dot notation for nested values)\n"
             "Examples:\n"
             "  alias bs=backscatter temp=temp_water\n"
             "  plot y=bs 5min smooth=loess frac=0.15 show=true save=true out=outputs/plots/bs_5min.png\n"
-            "  scatter depth vs temperature smooth=loess frac=0.1 outliers=zscore z_thresh=2.5\n"
+            "  scatter depth vs temperature smooth=loess frac=0.1 outliers=modified_zscore z_thresh=3.5\n"
             "  scatter x:salinity y:depth xlog:true xmin:1e-3 xmax:1e2 save:true show:false\n"
             "  boxplot y:backscatter x:depth xbins:10 start_date:2024-10-06 end_date:2024-10-07 log:true min:50 max:200 outliers:zscore save:true\n"
             "  map depth\n"
@@ -918,8 +1057,12 @@ class TaskExecutor:
             df[column] = pd.to_numeric(df[column], errors="coerce")
         
         # Outlier filtering (before min/max thresholds)
-        if outlier_method == "zscore":
-            result_df = self.stats.detect_outliers(df, column, method="zscore", z_thresh=z_thresh)
+        if isinstance(outlier_method, str):
+            outlier_method = outlier_method.lower()
+        normalized_method = outlier_method.replace("-", "_") if isinstance(outlier_method, str) else outlier_method
+        if normalized_method in {"zscore", "modified_zscore", "mzscore"}:
+            method = "modified_zscore" if normalized_method in {"modified_zscore", "mzscore"} else "zscore"
+            result_df = self.stats.detect_outliers(df, column, method=method, z_thresh=z_thresh)
             if "outlier" in result_df.columns:
                 df = result_df.loc[~result_df["outlier"]].copy()
                 df = df.drop(columns=["outlier"], errors="ignore")

@@ -1,0 +1,4 @@
+
+(1) I want to be able to save week number (along with day etc., using the "create" syntax ) 
+(2) I want to be able to access a newly created dataset (using the "stats" syntax) for additional plotting and stats. Now it is just saved as a txt/csv but I want to have access to the new aggregated data as an object
+(3) I want to be able to access the variables that are loaded as analysis (e.g. TS_mean) when I use the "calc" syntax. For example, I want to be able to run this expression: "calc abund_km2=(nasc0/(10**(TS_mean/10)))/(conv_nmi2_km2)"

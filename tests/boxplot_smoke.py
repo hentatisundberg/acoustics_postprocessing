@@ -32,9 +32,9 @@ if __name__ == "__main__":
             break
     preferred = preferred or numeric_cols[0]
     print("Boxplot column:", preferred)
-    # Boxplot basic
+    # Boxplot basic (using new y vs x syntax with xbins for continuous x grouping)
     cmd = interpreter.parse_command(
-        f"boxplot y:{preferred} show=false save=true out=outputs/plots/smoke_boxplot.png"
+        f"boxplot {preferred} vs latitude xbins=5 show=false save=true out=outputs/plots/smoke_boxplot.png"
     )
     res2 = executor.execute(cmd)
     print(res2.message)
