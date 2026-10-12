@@ -39,6 +39,11 @@ visualization:
     hex_edge_color: "none"
     hex_alpha: 0.7
     coastline_path: "./data/geodata/CNTR_RG_03M_2024_4326.geojson"
+    show_coastline: true
+    projection: "EPSG:3006"
+    background_map: "OpenStreetMap"
+    colorbar_orientation: "horizontal"
+    figsize: [10, 6]
   map_basemap: "OpenStreetMap"
 
 interface:

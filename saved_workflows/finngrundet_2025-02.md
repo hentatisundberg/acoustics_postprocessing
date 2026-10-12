@@ -1,8 +1,12 @@
 
 # Workflow for Finngrundet pre-analysis, February 2025
 
+# Start CLI
+source .venv/bin/activate
+python -m main
+
 # Load data 
-load dir=./data/data pattern=SLUAquaSailor* positions=./positions/positions.txt
+load dir=./data/data_baltic pattern=SLUAquaSailor* positions=./positions/positions.txt config=config/analysis_params_Finngrundet.yaml
 
 # Add year etc. to dataset
 create year from timestamp        # Extract year
@@ -39,6 +43,7 @@ scatter tonnes_km2 vs northing 30min outliers=modified_zscore z_thresh=10
 scatter tonnes_km2 vs easting 30min outliers=modified_zscore z_thresh=10   
 
 # Map of abundance estimates
+map nasc0 res=7 outliers=modified_zscore z_thresh=10 backend=folium  
 
 
 # Summarize by 30 min and export

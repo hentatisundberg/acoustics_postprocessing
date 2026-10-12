@@ -114,8 +114,11 @@ class CommandInterpreter:
             return {"task": "alias", "aliases": {k.lower(): v for k, v in pairs}}
 
         if s.startswith("load"):
-            pairs = re.findall(r"(pattern|positions|dir)=([^\s]+)", raw, flags=re.IGNORECASE)
-            params = {k.lower(): v for k, v in pairs}
+            params: Dict[str, str] = {}
+            for key in ("dir", "pattern", "positions", "config", "analysis"):
+                value = self._find_param(raw, [key])
+                if value is not None:
+                    params[key] = value
             return {"task": "load", "params": params}
 
         if s.startswith("analysis"):
@@ -165,7 +168,13 @@ class CommandInterpreter:
             return cmd
 
         if "map" in s or "hex" in s:
-            y = self._find_param(raw, ["y", "value", "column", "backscatter"]) or "backscatter"
+            y = self._find_param(raw, ["y", "value", "column", "backscatter"])
+            if not y:
+                simple_match = re.match(r"map\s+([^\s=]+)(?=\s|$)", raw, flags=re.IGNORECASE)
+                if simple_match:
+                    y = simple_match.group(1)
+            if not y:
+                y = "backscatter"
             res = self._find_int(s, r"res=(\d+)") or 8
             backend = None
             if "matplotlib" in s or "mpl" in s:

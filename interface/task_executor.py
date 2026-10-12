@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import pandas as pd
+from pandas.errors import ParserError
 import numpy as np
 import os
 import sys
@@ -35,33 +37,62 @@ class ExecutionResult:
 
 class TaskExecutor:
     def __init__(self, config_path: Path = Path("config/settings.yaml"), analysis_params_path: Path | None = None):
-        self.config = read_config(config_path)
-        setup_logging(self.config.get("logging", {}).get("level", "INFO"))
+        self.state: Dict[str, Any] = {}
+        self.config_path = config_path
+        self._load_config(config_path)
+        self._position_delimiters = [",", "\t", ";", "|"]
         self.data: Optional[pd.DataFrame] = None
         self.positions: Optional[pd.DataFrame] = None
         self.merged: Optional[pd.DataFrame] = None
         self.temporal = TemporalAggregator()
-        self.spatial = SpatialAggregator()
         self.stats = StatisticsCalculator()
         self.plotter = TimeSeriesPlotter()
-        self.mapgen = HexagonalMapGenerator()
-        self.state: Dict[str, Any] = {
-            "data_dir": self.config["data"]["network_storage_path"],
-            "pattern": self.config["data"]["acoustic_csv_pattern"],
-            "positions": self.config["data"]["position_file"],
-        }
         self.last_stats_dataset: Optional[pd.DataFrame] = None
         analysis_file = analysis_params_path or config_path.parent / "analysis_params.yaml"
+        self.analysis_params_path = analysis_file
         self.analysis_params: Dict[str, Any] = {}
         self.analysis_context: Dict[str, Any] = {}
-        if analysis_file.exists():
-            self.analysis_params = read_config(analysis_file) or {}
-            self.analysis_context = self._build_analysis_context(self.analysis_params)
-            self._evaluate_analysis_expressions()
-        else:
+        if not self._load_analysis_params(analysis_file):
             logger.debug("Analysis params file not found at %s", analysis_file)
         # User-defined CLI variable aliases, e.g., {"bs": "backscatter"}
         self.aliases: Dict[str, str] = {}
+
+    def _load_config(self, config_path: Path) -> None:
+        self.config_path = config_path
+        cfg = read_config(config_path) or {}
+        self.config = cfg
+        setup_logging(cfg.get("logging", {}).get("level", "INFO"))
+        data_cfg = cfg.get("data", {})
+        self.state["data_dir"] = data_cfg.get("network_storage_path", "./data")
+        self.state["pattern"] = data_cfg.get("acoustic_csv_pattern", "*.csv")
+        self.state["positions"] = data_cfg.get("position_file", "positions.csv")
+        self.mapgen = HexagonalMapGenerator(config=self.config)
+
+    def _load_analysis_params(self, path: Path) -> bool:
+        data = read_config(path) if path.exists() else None
+        if data is None:
+            return False
+        self.analysis_params = data or {}
+        self.analysis_context = self._build_analysis_context(self.analysis_params)
+        self._evaluate_analysis_expressions()
+        self.analysis_params_path = path
+        return True
+
+    def _resolve_path_with_search_dirs(self, candidate: Path | str, bases: list[Path]) -> Path | None:
+        path = Path(candidate)
+        if path.exists():
+            return path
+        for base in bases:
+            alt = base / path
+            if alt.exists():
+                return alt
+            alt_name = base / path.name
+            if alt_name.exists():
+                return alt_name
+        return None
+
+    def _looks_like_analysis_params(self, path: Path) -> bool:
+        return "analysis_params" in path.name.lower()
 
     def execute(self, command: Dict[str, Any]) -> ExecutionResult:
         task = command.get("task")
@@ -223,6 +254,26 @@ class TaskExecutor:
         return name
 
     def _load_data(self, params: Dict[str, Any]) -> ExecutionResult:
+        search_dirs = [Path.cwd(), self.config_path.parent, Path("config")]
+        config_override = params.get("config")
+        analysis_override = params.get("analysis")
+        if config_override:
+            resolved = self._resolve_path_with_search_dirs(config_override, search_dirs)
+            if not resolved:
+                return ExecutionResult(False, f"Config file not found: {config_override}")
+            if self._looks_like_analysis_params(resolved):
+                if not analysis_override:
+                    analysis_override = str(resolved)
+            else:
+                self._load_config(resolved)
+        resolved_analysis_path: Path | None = None
+        if analysis_override:
+            resolved_analysis_path = self._resolve_path_with_search_dirs(analysis_override, search_dirs)
+            if not resolved_analysis_path:
+                return ExecutionResult(False, f"Analysis params file not found: {analysis_override}")
+        if resolved_analysis_path:
+            if not self._load_analysis_params(resolved_analysis_path):
+                return ExecutionResult(False, f"Failed to load analysis params from {resolved_analysis_path}")
         data_dir = Path(params.get("dir", self.state["data_dir"]))
         pattern = params.get("pattern", self.state["pattern"])
         pos_file = Path(params.get("positions", self.state["positions"]))
@@ -248,6 +299,20 @@ class TaskExecutor:
             return ExecutionResult(False, f"After excluding positions file, no acoustic files remain in {data_dir} for pattern {pattern}")
 
         df = loader.load_csv_files(files, lazy=False)
+        if "timestamp" in df.columns:
+            df["timestamp"] = self._normalize_timestamp_series(df["timestamp"])
+            missing_ts = df["timestamp"].isna()
+            if missing_ts.any():
+                logger.warning(
+                    "Dropped %d acoustic rows because timestamp parsing failed.",
+                    missing_ts.sum(),
+                )
+                df = df.loc[~missing_ts]
+            self._log_timestamp_summary(df["timestamp"])
+
+        df = df.reset_index(drop=True)
+        df["_source_row_id"] = df.index
+        embedded_coords = self._extract_embedded_coordinates(df)
 
         # Resolve positions path: accept absolute, relative, or relative to data_dir
         if not pos_file.exists():
@@ -262,10 +327,10 @@ class TaskExecutor:
         # Load positions with robust, case-insensitive column handling
         # Accept variants like 'Time'/'time', 'Lat'/'lat'/'latitude', 'Long'/'lon'/'longitude'
         sep = "\t" if pos_file.suffix.lower() in {".tsv", ".txt"} else ","
-        positions = pd.read_csv(pos_file, sep=sep)
+        positions = self._read_positions_file(pos_file, sep)
         col_lut = {c.lower().strip(): c for c in positions.columns}
         # Identify canonical columns
-        time_key = next((k for k in ("time", "timestamp", "datetime", "date") if k in col_lut), None)
+        time_key = next((k for k in ("time", "timestamp", "datetime", "date", "utc_time") if k in col_lut), None)
         lat_key = next((k for k in ("lat", "latitude", "y") if k in col_lut), None)
         lon_key = next((k for k in ("long", "lon", "longitude", "x") if k in col_lut), None)
         if not time_key:
@@ -279,19 +344,170 @@ class TaskExecutor:
                 col_lut[lon_key]: "longitude",
             }
         )
-        # Ensure timestamp is datetime
-        positions["timestamp"] = pd.to_datetime(positions["timestamp"], errors="coerce")
-        # Drop rows where timestamp failed to parse to avoid merge issues
-        positions = positions.dropna(subset=["timestamp"]).reset_index(drop=True)
+        positions = self._sanitize_positions(positions)
 
         merger = PositionMerger(acoustic_time_col="timestamp", position_time_col="timestamp", lat_col="latitude", lon_col="longitude")
         # Use interpolation-based assignment to handle non-matching timestamps robustly
         merged = merger.merge_positions_interpolated(df, positions)
 
+        if embedded_coords is not None:
+            merged = self._apply_embedded_coordinates(merged, embedded_coords)
+
+        df = df.drop(columns=["_source_row_id"], errors="ignore")
+        merged = merged.drop(columns=["_source_row_id"], errors="ignore")
+
         self.data = df
         self.positions = positions
         self.merged = merged
         return ExecutionResult(True, f"Loaded {len(df)} rows; merged with positions ({len(merged)} rows)")
+
+    def _read_positions_file(self, pos_file: Path, sep_hint: str | None) -> pd.DataFrame:
+        """Try multiple encodings and delimiters until the positions file parses."""
+        encodings = ("utf-8", "utf-8-sig", "latin-1", "cp1252")
+        last_exc: Exception | None = None
+        hints = [sep_hint] if sep_hint else []
+        for encoding in encodings:
+            try:
+                sample = self._read_positions_sample(pos_file, encoding)
+            except UnicodeDecodeError as exc:
+                last_exc = exc
+                logger.debug("Positions file %s failed to sample with %s", pos_file.name, encoding)
+                continue
+            separators = self._determine_position_separators(sample, hints)
+            for sep in separators:
+                try:
+                    return pd.read_csv(pos_file, sep=sep, encoding=encoding)
+                except ParserError as exc:
+                    last_exc = exc
+                    logger.debug(
+                        "Positions file %s could not be parsed with sep '%s' and encoding %s",
+                        pos_file.name,
+                        sep,
+                        encoding,
+                    )
+                except UnicodeDecodeError as exc:
+                    last_exc = exc
+                    logger.debug(
+                        "Positions file %s failed to decode with %s when trying sep '%s'",
+                        pos_file.name,
+                        encoding,
+                        sep,
+                    )
+        raise RuntimeError(
+            f"Unable to parse positions file {pos_file} with encodings {', '.join(encodings)} and delimiters {', '.join(self._position_delimiters)}"
+        ) from last_exc
+
+    def _read_positions_sample(self, pos_file: Path, encoding: str, size: int = 4096) -> str:
+        with open(pos_file, "rb") as fh:
+            raw = fh.read(size)
+        return raw.decode(encoding, errors="ignore")
+
+    def _determine_position_separators(self, sample: str, hints: list[str]) -> list[str]:
+        candidates: list[str] = []
+        for hint in hints:
+            if hint and hint not in candidates:
+                candidates.append(hint)
+        if sample:
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=self._position_delimiters)
+                if dialect.delimiter not in candidates:
+                    candidates.append(dialect.delimiter)
+            except csv.Error:
+                pass
+        for delim in self._position_delimiters:
+            if delim not in candidates:
+                candidates.append(delim)
+        return candidates
+
+    def _sanitize_positions(self, positions: pd.DataFrame) -> pd.DataFrame:
+        """Canonicalize timestamps and coordinates, warning if rows are dropped."""
+        positions["timestamp"] = self._normalize_timestamp_series(positions["timestamp"])
+        bad_time = positions["timestamp"].isna()
+        if bad_time.any():
+            logger.warning(
+                "Dropped %d rows from positions because their timestamps could not be parsed. Example: %s",
+                bad_time.sum(),
+                positions.loc[bad_time, ["timestamp", "latitude", "longitude"]].head(3).to_dict("records"),
+            )
+        positions = positions.loc[~bad_time]
+        non_numeric_cols = []
+        for coord in ("latitude", "longitude"):
+            positions[coord] = pd.to_numeric(positions[coord], errors="coerce")
+            if positions[coord].isna().any():
+                non_numeric_cols.append(coord)
+        bad_coords = positions[["latitude", "longitude"]].isna().any(axis=1)
+        if bad_coords.any():
+            logger.warning(
+                "Dropped %d rows from positions because %s values were not numeric. Example: %s",
+                bad_coords.sum(),
+                "/".join(non_numeric_cols) if non_numeric_cols else "latitude/longitude",
+                positions.loc[bad_coords, ["timestamp", "latitude", "longitude"]].head(3).to_dict("records"),
+            )
+        positions = positions.loc[~bad_coords].reset_index(drop=True)
+        return positions
+
+    def _extract_embedded_coordinates(self, df: pd.DataFrame) -> pd.DataFrame | None:
+        """Return parsed embedded latitude/longitude values indexed by source row ID."""
+        lat_candidates = ("lat", "latitude", "y")
+        lon_candidates = ("long", "lon", "longitude", "x")
+        col_lut = {c.lower().strip(): c for c in df.columns}
+        lat_key = next((k for k in lat_candidates if k in col_lut), None)
+        lon_key = next((k for k in lon_candidates if k in col_lut), None)
+        if not lat_key or not lon_key:
+            return None
+        coords = df[[col_lut.get(lat_key, lat_key), col_lut.get(lon_key, lon_key), "_source_row_id"]].copy()
+        coords.rename(columns={col_lut[lat_key]: "latitude", col_lut[lon_key]: "longitude"}, inplace=True)
+        for coord in ("latitude", "longitude"):
+            coords[coord] = pd.to_numeric(coords[coord], errors="coerce")
+        mask = coords[["latitude", "longitude"]].notna().all(axis=1)
+        if not mask.any():
+            return None
+        if mask.sum() < len(coords):
+            logger.warning(
+                "Ignored %d rows with unparseable embedded coordinates; falling back to positions for those entries.",
+                (~mask).sum(),
+            )
+        coords = coords.loc[mask].reset_index(drop=True)
+        return coords
+
+    def _apply_embedded_coordinates(self, merged: pd.DataFrame, embedded: pd.DataFrame) -> pd.DataFrame:
+        if embedded.empty or "_source_row_id" not in merged.columns:
+            return merged
+        embedded_indexed = embedded.set_index("_source_row_id")
+        merged_indexed = merged.set_index("_source_row_id")
+        for coord in ("latitude", "longitude"):
+            if coord not in merged_indexed.columns:
+                continue
+            overrides = embedded_indexed[coord].dropna()
+            if overrides.empty:
+                continue
+            merged_indexed.loc[overrides.index, coord] = overrides
+        merged = merged_indexed.reset_index()
+        return merged
+
+    def _normalize_timestamp_series(self, series: pd.Series) -> pd.Series:
+        ts = pd.to_datetime(series, errors="coerce")
+        if ts.dt.tz is not None:
+            ts = ts.dt.tz_convert(None)
+        return ts
+
+    def _log_timestamp_summary(self, series: pd.Series) -> None:
+        """Log the span of timestamps and per-year counts."""
+        if not pd.api.types.is_datetime64_any_dtype(series):
+            series = pd.to_datetime(series, errors="coerce")
+        if series.isna().all():
+            logger.warning("Acoustic timestamps are all NaT after parsing; no data will merge.")
+            return
+        counts = series.dt.year.value_counts().sort_index()
+        if counts.empty:
+            return
+        summary = ", ".join(f"{int(year)}:{int(count)}" for year, count in counts.items())
+        logger.info(
+            "Acoustic timestamps span %s to %s (counts by year: %s)",
+            series.min(),
+            series.max(),
+            summary,
+        )
 
     def _ensure_data(self) -> None:
         if self.merged is None:
@@ -575,7 +791,6 @@ class TaskExecutor:
     def _hex_map(self, y: str, resolution: int, backend: str = None, show: bool = True, coastline_path: str = None, east_lim: list[float] | None = None, north_lim: list[float] | None = None, opts: Optional[Dict[str, Any]] = None) -> ExecutionResult:
         self._ensure_data()
         opts = opts or {}
-        # Optional date filtering before spatial aggregation
         try:
             df_src = self._filter_by_date_range(
                 self.merged,
@@ -584,9 +799,10 @@ class TaskExecutor:
             )
         except Exception:
             df_src = self.merged
+        y, column_note = self._choose_plot_column(y, df_src)
+        note_suffix = f" {column_note}" if column_note else ""
         if y not in df_src.columns:
             return ExecutionResult(False, self._unknown_column_message(y))
-        # Apply thresholds (and optional negative) prior to spatial aggregation
         try:
             df_src, y_used = self._apply_transformations(
                 df_src,
@@ -600,46 +816,44 @@ class TaskExecutor:
             )
         except Exception:
             y_used = y
-        df = self.spatial.assign_hex_ids(df_src, resolution)
-        agg = self.spatial.aggregate_by_hex(df, {y_used: "mean", "timestamp": "count"}).rename(columns={"timestamp": "count"})
-        backend = backend or self.config.get("visualization", {}).get("map", {}).get("default_backend", "matplotlib")
-        coords_cfg = self.config.get("coordinates", {})
-        columns = coords_cfg.get("columns", {})
-        sweref_mode = coords_cfg.get("output_crs", "EPSG:3006") == coords_cfg.get("active_crs", coords_cfg.get("output_crs", "EPSG:3006"))
-
-        # Use default coastline path from config if none provided
-        if coastline_path is None:
-            coastline_path = (
-                self.config.get("visualization", {})
-                .get("map", {})
-                .get("coastline_path")
-            )
-
-        # Coastline cropping and reprojection logic
-        cropped_coastline_path = None
-        if coastline_path and Path(coastline_path).exists():
+        map_settings = self._get_map_settings()
+        if coastline_path:
+            map_settings["coastline_path"] = coastline_path
+        coords_cfg = self._build_coords_config(map_settings)
+        projection = map_settings.get("projection") or coords_cfg.get("active_crs") or coords_cfg.get("output_crs", "EPSG:3006")
+        sweref_mode = projection == coords_cfg.get("output_crs", "EPSG:3006")
+        center = self._calculate_map_center(df_src, coords_cfg)
+        spatial = SpatialAggregator(coords_cfg=coords_cfg)
+        df = spatial.assign_hex_ids(df_src, resolution)
+        agg = spatial.aggregate_by_hex(df, {y_used: "mean", "timestamp": "count"}).rename(columns={"timestamp": "count"})
+        backend = backend or map_settings.get("default_backend", "matplotlib")
+        coastline_default = map_settings.get("coastline_path")
+        show_coastline = map_settings.get("show_coastline", True)
+        cropped_coastline_path = coastline_default
+        hex_bounds = self._calculate_hex_bounds(agg, spatial)
+        target_crs = projection if backend == "matplotlib" else "EPSG:4326"
+        if show_coastline and coastline_default and Path(coastline_default).exists():
             try:
                 import geopandas as gpd
-                minx, maxx = 12, 20  # Longitude
-                miny, maxy = 55, 62  # Latitude
-                coast = gpd.read_file(coastline_path)
-                coast_cropped = coast.cx[minx:maxx, miny:maxy]
-                # Choose CRS for coastline based on backend
                 from tempfile import NamedTemporaryFile
-                if backend == "matplotlib" and sweref_mode:
-                    coast_out = coast_cropped.to_crs("EPSG:3006")
-                else:
-                    # Keep WGS84 for folium or non-sweref matplotlib
-                    coast_out = coast_cropped.to_crs("EPSG:4326")
+
+                coast = gpd.read_file(coastline_default)
+                coast = coast.to_crs("EPSG:4326")
+                cropped = coast
+                if hex_bounds:
+                    minx, maxx, miny, maxy = hex_bounds
+                    if maxx > minx and maxy > miny:
+                        margin = max((maxx - minx), (maxy - miny)) * 0.1 or 0.1
+                        cropped = coast.cx[minx - margin : maxx + margin, miny - margin : maxy + margin]
+                        if cropped.empty:
+                            cropped = coast
+                cropped = cropped.to_crs(target_crs)
                 with NamedTemporaryFile(suffix=".geojson", delete=False) as tmp:
-                    coast_out.to_file(tmp.name, driver="GeoJSON")
+                    cropped.to_file(tmp.name, driver="GeoJSON")
                     cropped_coastline_path = tmp.name
             except Exception as e:
                 print(f"Warning: Could not crop/reproject coastline: {e}")
-                cropped_coastline_path = coastline_path
-        else:
-            cropped_coastline_path = coastline_path
-
+                cropped_coastline_path = coastline_default
         if backend == "matplotlib":
             from visualization.mpl_map import create_matplotlib_hex_map
             vmin = self._coerce_float(opts.get("min"))
@@ -647,6 +861,8 @@ class TaskExecutor:
             fig = create_matplotlib_hex_map(
                 agg,
                 value_column=y_used,
+                map_settings=map_settings,
+                coords_cfg=coords_cfg,
                 show=show,
                 coastline_path=cropped_coastline_path,
                 east_lim=east_lim,
@@ -657,21 +873,24 @@ class TaskExecutor:
             out = Path("outputs/maps/hex_map.png")
             out.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(out, dpi=300, bbox_inches='tight')
-            # Show window is handled in create_matplotlib_hex_map
-            return ExecutionResult(True, f"Matplotlib map created and shown. Saved to {out}", artifact=out)
+            return ExecutionResult(True, f"Matplotlib map created and shown. Saved to {out}{note_suffix}", artifact=out)
         else:
-            m = self.mapgen.create_hexagon_map(agg, value_column=y_used, coastline_path=cropped_coastline_path)
-            # Apply bounds if provided
+            m = self.mapgen.create_hexagon_map(
+                agg,
+                value_column=y_used,
+                center=center,
+                coastline_path=cropped_coastline_path,
+                map_settings=map_settings,
+                coords_cfg=coords_cfg,
+            )
             try:
                 if east_lim and north_lim:
                     from pyproj import Transformer
                     if sweref_mode:
-                        # Convert SWEREF99 easting/northing to lon/lat for folium bounds
                         t_inv = Transformer.from_crs("EPSG:3006", "EPSG:4326", always_xy=True)
                         west_lon, south_lat = t_inv.transform(east_lim[0], north_lim[0])
                         east_lon, north_lat = t_inv.transform(east_lim[1], north_lim[1])
                     else:
-                        # Interpret limits as lon/lat directly
                         west_lon, east_lon = east_lim[0], east_lim[1]
                         south_lat, north_lat = north_lim[0], north_lim[1]
                     m.fit_bounds([[south_lat, west_lon], [north_lat, east_lon]])
@@ -681,7 +900,8 @@ class TaskExecutor:
             self.mapgen.save_map(m, out)
             if show:
                 self.mapgen.show_map(m)
-            return ExecutionResult(True, f"Folium map created and shown. Saved to {out}", artifact=out)
+            message = f"Folium map created and shown. Saved to {out}{note_suffix}".replace("None", "")
+            return ExecutionResult(True, message, artifact=out)
 
     def _compute_stats(self, columns: list[str]) -> ExecutionResult:
         self._ensure_data()
@@ -919,7 +1139,8 @@ class TaskExecutor:
             "Commands:\n"
             "  set key=value [...]                # set dir, pattern, positions\n"
             "  alias name=column [...]             # define CLI variables (aliases) for columns\n"
-            "  load dir=./data pattern=*.csv positions=positions.csv\n"
+            "  load dir=./data pattern=*.csv positions=positions.csv config=config/settings.yaml analysis=config/analysis_params_Hudson.yaml\n"
+            "    # optional settings/analysis overrides take effect before loading\n"
             "  aggregate time 5min y=<alias|column>  # default y=backscatter if omitted\n"
             "  plot y=<alias|column> 5min [smooth=true|false|loess|savgol|rolling] [show=true|false] [save=true|false] [out=path]   # time series\n"
             "  scatter y:<column> [x:<column>] [smooth=true|false|loess|lowess] [frac:<0-1>] [show] [save] [out]   # scatter plot (custom x/y axes)\n"
@@ -985,26 +1206,87 @@ class TaskExecutor:
         alias_info = f" Aliases: {self.aliases}" if self.aliases else ""
         return f"Column not found: {col}. Available columns include: {sample}.{alias_info}"
 
-    def _choose_plot_column(self, requested: str, df: pd.DataFrame) -> tuple[str, str | None]:
+    def _choose_plot_column(self, requested: str | None, df: pd.DataFrame) -> tuple[str, str | None]:
         """Return a valid numeric column to plot.
 
         - If `requested` exists, use it.
-        - Else prefer 'backscatter' or 'depth' if present.
+        - Else prefer 'nasc0' or 'depth' if present.
         - Else pick the first numeric column excluding obvious non-plot columns.
         Returns (column, note) where note is a message suffix indicating fallback.
         """
-        if requested in df.columns:
-            return requested, None
+        requested_value = requested or ""
+        if requested_value and requested_value in df.columns:
+            return requested_value, None
         ignore = {"timestamp", "latitude", "longitude", "position_matched"}
         numeric_cols = [c for c in df.select_dtypes(include=["number"]).columns if c not in ignore]
-        for candidate in ("backscatter", "depth"):
+        for candidate in ("nasc0", "depth"):
             if candidate in numeric_cols:
-                return candidate, f" (column '{requested}' missing; used '{candidate}' instead)"
+                note = f" (column '{requested_value}' missing; used '{candidate}' instead)" if requested_value else None
+                return candidate, note
         if numeric_cols:
             chosen = numeric_cols[0]
-            return chosen, f" (column '{requested}' missing; used '{chosen}' instead)"
+            note = f" (column '{requested_value}' missing; used '{chosen}' instead)" if requested_value else None
+            return chosen, note
         # If no numeric columns, propagate original requested to trigger error downstream
-        return requested, None
+        return requested_value, None
+
+    def _get_map_settings(self) -> dict:
+        base = dict(self.config.get("visualization", {}).get("map", {}))
+        vis_overrides = self.analysis_params.get("visualization")
+        if isinstance(vis_overrides, dict):
+            map_override = vis_overrides.get("map")
+            if isinstance(map_override, dict):
+                base.update(map_override)
+        analysis_map_override = self.analysis_params.get("map")
+        if isinstance(analysis_map_override, dict):
+            base.update(analysis_map_override)
+        coords_cfg = self.config.get("coordinates", {})
+        default_projection = coords_cfg.get("active_crs") or coords_cfg.get("output_crs") or "EPSG:3006"
+        base.setdefault("projection", default_projection)
+        base.setdefault("show_coastline", True)
+        base.setdefault("default_backend", base.get("default_backend", "matplotlib"))
+        base.setdefault("background_map", base.get("background_map") or base.get("basemap_source") or "OpenStreetMap")
+        base.setdefault("colormap", base.get("colormap") or self.config.get("visualization", {}).get("default_colormap", "viridis"))
+        return base
+
+    def _build_coords_config(self, map_settings: dict) -> dict:
+        coords = dict(self.config.get("coordinates", {}))
+        columns = dict(coords.get("columns", {}))
+        coords["columns"] = columns
+        projection = map_settings.get("projection")
+        if projection:
+            coords["active_crs"] = projection
+        else:
+            coords.setdefault("active_crs", coords.get("output_crs", coords.get("input_crs", "EPSG:3006")))
+        return coords
+
+    def _calculate_map_center(self, df: pd.DataFrame, coords_cfg: dict) -> tuple[float, float] | None:
+        columns = coords_cfg.get("columns", {})
+        lat_col = columns.get("input_lat", "latitude")
+        lon_col = columns.get("input_lon", "longitude")
+        if lat_col not in df.columns or lon_col not in df.columns:
+            return None
+        sample = df[[lat_col, lon_col]].dropna()
+        if sample.empty:
+            return None
+        return float(sample[lat_col].mean()), float(sample[lon_col].mean())
+
+    def _calculate_hex_bounds(self, agg: pd.DataFrame, spatial: SpatialAggregator) -> tuple[float, float, float, float] | None:
+        hex_col = "h3_hex"
+        if hex_col not in agg.columns:
+            return None
+        hex_ids = [h for h in agg[hex_col].dropna().unique() if isinstance(h, str)]
+        if not hex_ids:
+            return None
+        try:
+            polygons = [spatial._hex_to_polygon(hex_id) for hex_id in hex_ids]
+        except Exception:
+            return None
+        minx = min(poly.bounds[0] for poly in polygons)
+        miny = min(poly.bounds[1] for poly in polygons)
+        maxx = max(poly.bounds[2] for poly in polygons)
+        maxy = max(poly.bounds[3] for poly in polygons)
+        return minx, maxx, miny, maxy
 
     # === Helpers: date filtering and transformations ===
     def _filter_by_date_range(self, data: pd.DataFrame, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:

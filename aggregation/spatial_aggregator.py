@@ -17,12 +17,17 @@ from pathlib import Path
 from utils.io_helpers import read_config
 
 class SpatialAggregator:
-    def __init__(self, lat_col: Optional[str] = None, lon_col: Optional[str] = None, config_path: str | Path = "config/settings.yaml"):
-        # Load config for CRS/column selection
-        config = read_config(Path(config_path))
-        coords_cfg = config.get("coordinates", {})
+    def __init__(self, lat_col: Optional[str] = None, lon_col: Optional[str] = None, config_path: str | Path = "config/settings.yaml", coords_cfg: dict | None = None):
+        # Load config for CRS/column selection (allow overrides to support dynamic map projections)
+        if coords_cfg is None:
+            config = read_config(Path(config_path))
+            coords_cfg = config.get("coordinates", {})
+        else:
+            coords_cfg = dict(coords_cfg)
         columns = coords_cfg.get("columns", {})
-        self.sweref_mode = coords_cfg.get("output_crs", "EPSG:3006") == coords_cfg.get("active_crs", coords_cfg.get("output_crs", "EPSG:3006"))
+        output_crs = coords_cfg.get("output_crs", "EPSG:3006")
+        active_crs = coords_cfg.get("active_crs") or output_crs
+        self.sweref_mode = active_crs == output_crs
         # Use easting/northing if SWEREF99 is active, else lat/lon
         self.lat_col = lat_col or (columns.get("output_northing") if self.sweref_mode else columns.get("input_lat", "latitude"))
         self.lon_col = lon_col or (columns.get("output_easting") if self.sweref_mode else columns.get("input_lon", "longitude"))
